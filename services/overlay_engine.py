@@ -75,6 +75,21 @@ class OverlayEngine:
             if current and current["rule_id"] == expected_rule_id:
                 continue  # уже работает как надо
 
+            # НОВОЕ: восстановление после рестарта Flask
+            # Если в ProcessManager уже есть живой процесс с нужным режимом —
+            # не запускаем дубликат, просто регистрируем в active_channels.
+            if self._process_matches_state(url, active_rule):
+                ch_id = _channel_id(url)
+                with self._lock:
+                    self.active_channels[url] = {
+                        "rule_id": expected_rule_id,
+                        "process_name": f"proxy_{ch_id}",
+                        "ch_id": ch_id,
+                    }
+                mode = "OVERLAY" if active_rule else "COPY"
+                print(f"[overlay] {ch_id} restored in mode: {mode}")
+                continue
+
             if current:
                 self._stop_channel(url)
 
@@ -82,6 +97,24 @@ class OverlayEngine:
 
         # 5. Чистим старые файлы
         self._cleanup_old_segments(max_age_sec=3600)
+
+    def _process_matches_state(self, url: str, rule: OverlayRule | None) -> bool:
+        """
+        Проверяет: жив ли процесс для этого канала и в нужном ли он режиме
+        (COPY без -vf, OVERLAY с -vf).
+        Используется для восстановления после рестарта Flask.
+        """
+        ch_id = _channel_id(url)
+        proc_name = f"proxy_{ch_id}"
+        cmd = self.pm.get_command(proc_name)
+        if cmd is None:
+            return False
+        st = self.pm.status(proc_name)
+        if not st.get("running"):
+            return False
+        has_vf = "-vf" in cmd
+        needs_vf = rule is not None
+        return has_vf == needs_vf
 
     def stop_all(self) -> None:
         with self._lock:
