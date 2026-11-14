@@ -17,7 +17,9 @@ class Config:
     AUTHOR_EMAIL = ""
     LICENSE_NAME = "MIT"
     PROJECT_URL = "https://github.com/andrey-geben/IPTV_OVERLAY_MPTS"
-
+    # Шрифты (для overlay)
+    FONTS_DIR = BASE_DIR / "static" / "fonts"
+    DEFAULT_OVERLAY_FONT = FONTS_DIR / "DejaVuSans.ttf"
     # Flask
     SECRET_KEY = "dev-secret-change-me-please"
     DEBUG = True

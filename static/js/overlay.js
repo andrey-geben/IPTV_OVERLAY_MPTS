@@ -1,7 +1,6 @@
 let availableChannels = [];
 
 async function initPage() {
-    // Загружаем доступные каналы (из рабочего плейлиста)
     const r = await fetch("/api/overlay/available-channels");
     const data = await r.json();
     if (data.ok) {
@@ -51,7 +50,7 @@ document.getElementById("btn-save-rule").addEventListener("click", async () => {
         id: document.getElementById("rule-id").value || null,
         name: document.getElementById("rule-name").value,
         text: document.getElementById("rule-text").value,
-        font_path: document.getElementById("rule-font").value,
+        font_path: document.getElementById("rule-font").value.trim() || "",
         font_size: parseInt(document.getElementById("rule-fontsize").value),
         font_color: fontColorName || fontColorHex,
         font_alpha: 1.0,
@@ -71,28 +70,35 @@ document.getElementById("btn-save-rule").addEventListener("click", async () => {
         force: false,
     };
 
-    let r = await fetch("/api/overlay/rules", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-    });
-    let data = await r.json();
-
-    if (!data.ok && data.require_confirm) {
-        if (!confirm(data.warning)) return;
-        payload.force = true;
-        r = await fetch("/api/overlay/rules", {
-            method: "POST", headers: { "Content-Type": "application/json" },
+    try {
+        let r = await fetch("/api/overlay/rules", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
         });
-        data = await r.json();
-    }
+        let data = await r.json();
 
-    if (data.ok) {
-        alert("Правило сохранено!");
-        loadRules();
-        document.getElementById("rule-id").value = "";
-    } else {
-        alert("Ошибка: " + data.error);
+        // Единый диалог предупреждений
+        if (!data.ok && data.require_confirm) {
+            if (!confirm(data.warning)) return;
+            payload.force = true;
+            r = await fetch("/api/overlay/rules", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            data = await r.json();
+        }
+
+        if (data.ok) {
+            alert("Правило сохранено!");
+            loadRules();
+            document.getElementById("rule-id").value = "";
+        } else {
+            alert("Ошибка: " + (data.error || "неизвестно"));
+        }
+    } catch (e) {
+        alert("Сетевая ошибка: " + e.message);
     }
 });
 
@@ -125,6 +131,7 @@ async function deleteRule(id) {
     await fetch(`/api/overlay/rules/${id}`, { method: "DELETE" });
     loadRules();
 }
+window.deleteRule = deleteRule;
 
 document.getElementById("btn-reset-rule").addEventListener("click", () => {
     document.getElementById("rule-id").value = "";
@@ -136,6 +143,86 @@ document.getElementById("rule-fontcolor").addEventListener("input", () => {
 });
 document.getElementById("rule-boxcolor").addEventListener("input", () => {
     document.getElementById("rule-boxcolor-name").value = "";
+});
+
+// ============================================================
+// Палитра символов
+// ============================================================
+
+const SYMBOLS = {
+    stars:   ["★", "☆", "✪", "✦", "✧", "✶", "✷", "✸", "✹", "✵", "✴", "✳", "✲", "✱", "✰"],
+    hearts:  ["♥", "♡", "♦", "♢", "♣", "♧", "♠", "♤"],
+    music:   ["♪", "♫", "♬", "♩", "♭", "♮", "♯"],
+    arrows:  ["→", "←", "↑", "↓", "↔", "↕", "⇒", "⇐", "⇑", "⇓", "⇔", "➜", "➤", "➔"],
+    checks:  ["✓", "✔", "✗", "✘", "☑", "☒", "☐"],
+    weather: ["☀", "☼", "☁", "☂", "☃", "❄", "❅", "❆", "☔"],
+    geo:     ["●", "○", "◆", "◇", "■", "□", "▲", "△", "▼", "▽", "◀", "▶", "◄", "►", "◯", "◉", "◎"],
+    misc:    ["§", "¶", "†", "‡", "•", "‰", "°", "±", "×", "÷", "©", "®", "™", "☎", "☏", "☺", "☻", "♨", "☯", "✂", "✈"],
+};
+
+let currentCategory = "stars";
+
+function openSymbolsModal() {
+    const modal = document.getElementById("symbols-modal");
+    if (!modal) return;
+    modal.style.display = "flex";
+    renderSymbols(currentCategory);
+}
+
+function closeSymbolsModal() {
+    const modal = document.getElementById("symbols-modal");
+    if (modal) modal.style.display = "none";
+}
+
+function renderSymbols(category) {
+    currentCategory = category;
+    const grid = document.getElementById("symbols-grid");
+    if (!grid) return;
+    grid.innerHTML = "";
+    (SYMBOLS[category] || []).forEach(sym => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "symbol-btn";
+        btn.textContent = sym;
+        btn.title = `Вставить: ${sym}`;
+        btn.addEventListener("click", () => insertSymbol(sym));
+        grid.appendChild(btn);
+    });
+}
+
+function insertSymbol(sym) {
+    const input = document.getElementById("rule-text");
+    if (!input) return;
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? input.value.length;
+    const before = input.value.substring(0, start);
+    const after = input.value.substring(end);
+    input.value = before + sym + after;
+    const newPos = start + sym.length;
+    input.focus();
+    input.setSelectionRange(newPos, newPos);
+}
+
+document.getElementById("btn-symbols").addEventListener("click", openSymbolsModal);
+document.getElementById("symbols-close").addEventListener("click", closeSymbolsModal);
+
+const modal = document.getElementById("symbols-modal");
+if (modal) {
+    modal.addEventListener("click", (e) => {
+        if (e.target === modal) closeSymbolsModal();
+    });
+}
+
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeSymbolsModal();
+});
+
+document.querySelectorAll(".symbol-tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+        document.querySelectorAll(".symbol-tab").forEach(t => t.classList.remove("is-active"));
+        tab.classList.add("is-active");
+        renderSymbols(tab.dataset.cat);
+    });
 });
 
 initPage();

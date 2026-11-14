@@ -23,7 +23,10 @@
                 <input type="text" id="rule-name" value="Новая строка">
             </div>
             <div class="form-col">
-                <label class="field-label">Текст</label>
+                <label class="field-label">
+                    Текст
+                    <button type="button" id="btn-symbols" class="btn btn--small" style="padding:1px 8px; font-size:9px; margin-left:6px;">★ Символы</button>
+                </label>
                 <input type="text" id="rule-text" value="Внимание!">
             </div>
         </div>
@@ -31,7 +34,7 @@
         <div class="form-row">
             <div class="form-col">
                 <label class="field-label">Шрифт</label>
-                <input type="text" id="rule-font" value="C:/Windows/Fonts/seguiemj.ttf">
+                <input type="text" id="rule-font" value="" placeholder="(по умолчанию: DejaVu Sans)">
             </div>
             <div class="form-col">
                 <label class="field-label">Размер</label>
@@ -147,5 +150,38 @@
     </table>
 </section>
 
-<script src="{{ url_for('static', filename='js/overlay.js') }}"></script>
+<!-- Модальное окно: палитра символов -->
+<div id="symbols-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-panel">
+        <div class="modal-header">
+            <h3 class="panel__title" style="margin:0; border:none;">
+                <span class="led led--on"></span>ПАЛИТРА СИМВОЛОВ
+            </h3>
+            <button type="button" id="symbols-close" class="btn btn--small">✗ Закрыть</button>
+        </div>
+
+        <p class="hint" style="margin:6px 0 12px;">
+            Символы вставляются в поле «Текст». Проверьте, что они отображаются в вашем шрифте (обычно Arial поддерживает все символы ниже).
+        </p>
+
+        <div class="symbols-tabs">
+            <button type="button" class="symbol-tab is-active" data-cat="stars">Звёзды</button>
+            <button type="button" class="symbol-tab" data-cat="hearts">Сердца</button>
+            <button type="button" class="symbol-tab" data-cat="music">Музыка</button>
+            <button type="button" class="symbol-tab" data-cat="arrows">Стрелки</button>
+            <button type="button" class="symbol-tab" data-cat="checks">Галочки</button>
+            <button type="button" class="symbol-tab" data-cat="weather">Погода</button>
+            <button type="button" class="symbol-tab" data-cat="geo">Геометрия</button>
+            <button type="button" class="symbol-tab" data-cat="misc">Разное</button>
+        </div>
+
+        <div id="symbols-grid" class="symbols-grid"></div>
+
+        <div class="modal-footer">
+            <span class="hint">Кликните на символ — он появится в поле «Текст».</span>
+        </div>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/overlay.js') }}?v=4"></script>
 {% endblock %}

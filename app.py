@@ -329,25 +329,46 @@ def api_overlay_rules():
     data = request.get_json(silent=True) or {}
     rule_id = data.get("id") or f"rule-{uuid.uuid4().hex[:6]}"
     req_urls = data.get("channel_urls", [])
+    rule_text_value = data.get("text", "")
 
-    # Проверка: каналы должны быть в MPTS
+    # --- Собираем ВСЕ предупреждения в один список ---
+    warnings = []
+
+    # 1. Эмодзи в тексте
+    emoji_chars = _find_emoji(rule_text_value)
+    if emoji_chars:
+        warnings.append(
+            f"⚠ В тексте обнаружены эмодзи: {' '.join(emoji_chars[:5])}\n"
+            f"   Шрифт Arial их не поддерживает — будут квадратики □.\n"
+            f"   Замените их на символы из палитры (★ Символы)."
+        )
+
+    # 2. Каналы не в MPTS
     mpts_channels = set()
     for g in mpts_cfg.groups:
         mpts_channels.update(g.channel_urls)
-
     missing_from_mpts = [u for u in req_urls if u not in mpts_channels]
-    if missing_from_mpts and not data.get("force"):
+    if missing_from_mpts:
+        warnings.append(
+            f"⚠ {len(missing_from_mpts)} канал(ов) не входят в сетку вещания (MPTS).\n"
+            f"   Строка на них не попадёт в эфир."
+        )
+
+    # Если есть предупреждения и пользователь не подтвердил — возвращаем
+    if warnings and not data.get("force"):
         return jsonify({
-            "ok": False, "require_confirm": True,
-            "warning": f"Внимание! {len(missing_from_mpts)} канал(ов) не входят в сетку вещания (MPTS). Строка на них не попадёт в эфир. Продолжить?"
+            "ok": False,
+            "require_confirm": True,
+            "warning": "Внимание!\n\n" + "\n\n".join(warnings) + "\n\nВсё равно сохранить?"
         }), 400
 
+    # --- Сохраняем правило ---
     new_rule = OverlayRule(
         id=rule_id,
         name=data.get("name", "Без названия"),
         text=OverlayText(
-            text=data.get("text", "Текст"),
-            font_path=data.get("font_path", "C:/Windows/Fonts/seguiemj.ttf"),
+            text=rule_text_value or "Текст",
+            font_path=data.get("font_path", "").strip() or str(Config.DEFAULT_OVERLAY_FONT),
             font_size=int(data.get("font_size", 36)),
             font_color=data.get("font_color", "white"),
             font_alpha=float(data.get("font_alpha", 1.0)),
@@ -819,6 +840,45 @@ def serve_hls(ch_id, filename):
         resp.headers["Cache-Control"] = "public, max-age=5"
     return resp
 
+def _find_emoji(text: str) -> list[str]:
+    """
+    Находит эмодзи-символы в тексте.
+    Возвращает список уникальных найденных эмодзи.
+    """
+    if not text:
+        return []
+    found = []
+    seen = set()
+    for ch in text:
+        cp = ord(ch)
+        is_emoji = (
+            0x1F300 <= cp <= 0x1F9FF or   # Основные эмодзи
+            0x1F600 <= cp <= 0x1F64F or   # Смайлы
+            0x1F680 <= cp <= 0x1F6FF or   # Транспорт
+            0x1FA00 <= cp <= 0x1FAFF or   # Расширенные
+            0x2600 <= cp <= 0x27BF or     # Разные символы (⚡☀❄ и т.д.)
+            0x1F1E6 <= cp <= 0x1F1FF or   # Флаги
+            0x2B00 <= cp <= 0x2BFF         # Доп. стрелки и звёзды
+        )
+        # Исключения: символы, которые MЫ считаем допустимыми
+        safe_cp = {
+            0x2605, 0x2606,  # ★ ☆ (звёзды — есть в Arial)
+            0x2665, 0x2661,  # ♥ ♡ (сердца)
+            0x266A, 0x266B,  # ♪ ♫ (музыка)
+            0x2713, 0x2714, 0x2717, 0x2718,  # ✓ ✔ ✗ ✘ (галочки)
+            0x263A, 0x263B,  # ☺ ☻ (смайлы)
+            0x2600, 0x263C,  # ☀ ☼ (солнце)
+            0x2601, 0x2602, 0x2603,  # ☁ ☂ ☃
+            0x2744, 0x2745, 0x2746,  # ❄ ❅ ❆
+            0x2668,          # ♨ (горячий источник)
+            0x2702, 0x2708,  # ✂ ✈ (ножницы, самолёт)
+            0x26A1,          # ⚡ (молния — обычно рендерится)
+        }
+        if is_emoji and cp not in safe_cp:
+            if ch not in seen:
+                seen.add(ch)
+                found.append(ch)
+    return found
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=Config.DEBUG, use_reloader=False)

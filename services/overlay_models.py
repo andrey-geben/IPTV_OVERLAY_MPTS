@@ -3,13 +3,20 @@
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
+
+# Абсолютный путь к дефолтному шрифту.
+# Вычисляется от самого файла overlay_models.py — работает независимо от cwd.
+_DEFAULT_FONT = str(
+    Path(__file__).resolve().parent.parent / "static" / "fonts" / "DejaVuSans.ttf"
+)
 
 @dataclass
 class OverlayText:
     text: str = "Бегущая строка"
     # seguiemj.ttf поддерживает эмодзи (в Windows)
-    font_path: str = "C:/Windows/Fonts/seguiemj.ttf"
+    font_path: str = _DEFAULT_FONT
     font_size: int = 36
     font_color: str = "white"
     font_alpha: float = 1.0
