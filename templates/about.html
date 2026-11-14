@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+
+{% block title %}О программе — {{ config.APP_NAME }}{% endblock %}
+
+{% block content %}
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>О ПРОГРАММЕ</h2>
+
+    <div class="about-hero">
+        <div class="about-logo">
+            <span class="led led--on led--pulse"></span>
+            <span class="about-logo__text">{{ config.APP_NAME }}</span>
+        </div>
+        <div class="readout">v{{ config.VERSION }}</div>
+    </div>
+
+    <p>
+        Серверная система для операторов кабельного телевидения.
+        Управление IPTV-плейлистами, наложение бегущих строк по расписанию,
+        формирование MPTS-потоков для головных станций (PBI) и визуальный мониторинг.
+    </p>
+
+    <div class="test-stripe"></div>
+
+    <dl class="about-meta">
+        <dt>Автор</dt>
+        <dd><a href="{{ config.AUTHOR_URL }}" target="_blank" rel="noopener">{{ config.AUTHOR }}</a></dd>
+
+        <dt>Репозиторий</dt>
+        <dd><a href="{{ config.PROJECT_URL }}" target="_blank" rel="noopener">{{ config.PROJECT_URL }}</a></dd>
+
+        <dt>Лицензия</dt>
+        <dd>{{ config.LICENSE_NAME }} (см. файл <code>LICENSE</code>)</dd>
+
+        <dt>Технологии</dt>
+        <dd>Python 3.12 · Flask · APScheduler · FFmpeg · hls.js · psutil</dd>
+
+        <dt>Состояние</dt>
+        <dd><span class="led led--on"></span> Активная разработка</dd>
+    </dl>
+</section>
+
+<section class="panel" id="password">
+    <h2 class="panel__title"><span class="led led--warn"></span>БЕЗОПАСНОСТЬ</h2>
+
+    {% if session.user.must_change_password %}
+    <div class="alert alert--error">
+        <span class="led led--err"></span>
+        Вы используете пароль по умолчанию. Смените его прямо сейчас.
+    </div>
+    {% endif %}
+
+    <h3 class="field-label" style="margin-top:12px;">Смена пароля</h3>
+    <form id="password-form">
+        <label class="field-label" for="new-password">Новый пароль</label>
+        <input id="new-password" type="password" autocomplete="new-password" minlength="6" required>
+        <label class="field-label" for="new-password-2" style="margin-top:10px;">Повторите пароль</label>
+        <input id="new-password-2" type="password" autocomplete="new-password" minlength="6" required>
+
+        <div class="actions" style="margin-top:16px;">
+            <button type="submit" class="btn btn--primary">💾 СОХРАНИТЬ ПАРОЛЬ</button>
+            <span id="password-status" class="hint"></span>
+        </div>
+    </form>
+
+    <div class="actions" style="margin-top:24px;">
+        <a href="{{ url_for('logout_page') }}" class="btn btn--danger">ВЫЙТИ ИЗ СИСТЕМЫ</a>
+    </div>
+</section>
+
+<script>
+document.getElementById("password-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const p1 = document.getElementById("new-password").value;
+    const p2 = document.getElementById("new-password-2").value;
+    const status = document.getElementById("password-status");
+
+    if (p1.length < 6) { status.textContent = "Пароль слишком короткий"; return; }
+    if (p1 !== p2) { status.textContent = "Пароли не совпадают"; return; }
+
+    status.textContent = "Сохранение...";
+    try {
+        const r = await fetch("/api/auth/change-password", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ new_password: p1 }),
+        });
+        const data = await r.json();
+        if (data.ok) {
+            status.textContent = "✓ Пароль изменён. Перенаправление...";
+            setTimeout(() => { window.location.href = "/"; }, 800);
+        } else {
+            status.textContent = "Ошибка: " + (data.error || "неизвестно");
+        }
+    } catch (err) {
+        status.textContent = "Сетевая ошибка: " + err.message;
+    }
+});
+</script>
+
+{% endblock %}

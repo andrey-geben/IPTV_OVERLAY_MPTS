@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Вход — IPTV OVERLAY + MPTS</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="login-body">
+    <div class="login-wrap">
+        <div class="login-panel">
+            <div class="login-brand">
+                <span class="led led--on led--pulse"></span>
+                IPTV OVERLAY + MPTS
+            </div>
+
+            <div class="login-subtitle">АВТОРИЗАЦИЯ ОПЕРАТОРА</div>
+
+            <div class="test-stripe"></div>
+
+            <form method="post" action="{{ url_for('login_page') }}">
+                <input type="hidden" name="next" value="{{ next }}">
+
+                <label class="field-label" for="username">Логин</label>
+                <input id="username" name="username" type="text" autocomplete="username" autofocus required>
+
+                <label class="field-label" for="password" style="margin-top:12px;">Пароль</label>
+                <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+                {% if error %}
+                <div class="alert alert--error" style="margin-top:12px;">
+                    <span class="led led--err"></span>
+                    {{ error }}
+                </div>
+                {% endif %}
+
+                <div class="actions" style="margin-top:18px;">
+                    <button type="submit" class="btn btn--primary" style="flex:1;">▶ ВОЙТИ</button>
+                </div>
+            </form>
+
+            <div class="login-hint">
+                По умолчанию: <code>admin / admin</code>. Смените пароль после первого входа.
+            </div>
+        </div>
+    </div>
+</body>
+</html>

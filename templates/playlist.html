@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Плейлист — {{ config.APP_NAME }}{% endblock %}
+
+{% block content %}
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>ЗАГРУЗКА ПЛЕЙЛИСТА</h2>
+
+    <details class="help-spoiler">
+        <summary>Как начать работу</summary>
+        <div>
+            <p>Загрузите исходный IPTV-плейлист (160 каналов). Отметьте те каналы, которые пойдут в PBI (обычно 40–50). Остальные не будут обрабатываться.</p>
+            <p>После сохранения рабочий плейлист становится доступен на странице <strong>MPTS</strong> для формирования групп вещания.</p>
+        </div>
+    </details>
+
+    <div class="playlist-source">
+        <label for="playlist-content" class="field-label">Вставить содержимое M3U</label>
+        <textarea id="playlist-content" rows="6" spellcheck="false" placeholder="#EXTM3U..."></textarea>
+        <div class="actions">
+            <button id="btn-parse-text" type="button" class="btn btn--primary">▶ Разобрать текст</button>
+        </div>
+    </div>
+
+    <div class="playlist-divider">— или —</div>
+
+    <div class="playlist-source">
+        <label class="field-label">Загрузить файл</label>
+        <div class="inline-row">
+            <input id="playlist-file" type="file" accept=".m3u,.m3u8,.txt">
+            <button id="btn-parse-file" type="button" class="btn">▶ Загрузить файл</button>
+        </div>
+    </div>
+
+    <div class="playlist-divider">— или —</div>
+
+    <div class="playlist-source">
+        <label for="playlist-url" class="field-label">Ссылка на плейлист в сети</label>
+        <div class="inline-row">
+            <input id="playlist-url" type="text" placeholder="http://example.com/playlist.m3u">
+            <button id="btn-parse-url" type="button" class="btn">▶ Загрузить по URL</button>
+        </div>
+    </div>
+
+    <div class="actions" style="margin-top:18px;">
+        <span id="parse-meta" class="hint">Плейлист пока не загружен</span>
+    </div>
+</section>
+
+<section class="panel" id="channels-panel" style="display:none;">
+    <h2 class="panel__title"><span class="led led--on"></span>ВЫБОР КАНАЛОВ ДЛЯ ВЕЩАНИЯ</h2>
+
+    <div class="actions" style="margin-bottom: 12px;">
+        <button id="btn-select-all" type="button" class="btn btn--small">✓ Все</button>
+        <button id="btn-deselect-all" type="button" class="btn btn--small">✗ Ничего</button>
+        <span id="working-count" class="readout readout--sm" style="margin-left:10px;">0</span>
+        <span class="hint">каналов выбрано</span>
+    </div>
+
+    <table>
+        <thead><tr><th style="width:40px;">✓</th><th>Название</th><th>Группа</th><th>URL</th></tr></thead>
+        <tbody id="channels-body"></tbody>
+    </table>
+
+    <div class="actions" style="margin-top:16px;">
+        <button id="btn-save-working" type="button" class="btn btn--primary">💾 СОХРАНИТЬ РАБОЧИЙ ПЛЕЙЛИСТ</button>
+        <a href="/mpts" class="btn" style="display:none;" id="btn-next-mpts">ПЕРЕЙТИ К MPTS →</a>
+        <span id="save-status" class="hint"></span>
+    </div>
+</section>
+
+<script src="{{ url_for('static', filename='js/playlist.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}Overlay — {{ config.APP_NAME }}{% endblock %}
+
+{% block content %}
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>БЕГУЩИЕ СТРОКИ — ПРАВИЛА</h2>
+
+    <details class="help-spoiler">
+        <summary>Как работают правила</summary>
+        <div>
+            <p>Правило — это текст + расписание + список каналов. Строка будет показана только на каналах, которые <strong>уже находятся в сетке MPTS</strong>.</p>
+            <p>Изменения не прерывают поток: MPTS видит «discontinuity» и продолжает вещание. Канал может моргнуть на 1–2 секунды при смене правила.</p>
+        </div>
+    </details>
+
+    <form id="rule-form">
+        <input type="hidden" id="rule-id" value="">
+
+        <div class="form-row">
+            <div class="form-col">
+                <label class="field-label">Название</label>
+                <input type="text" id="rule-name" value="Новая строка">
+            </div>
+            <div class="form-col">
+                <label class="field-label">Текст</label>
+                <input type="text" id="rule-text" value="Внимание!">
+            </div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-col">
+                <label class="field-label">Шрифт</label>
+                <input type="text" id="rule-font" value="C:/Windows/Fonts/seguiemj.ttf">
+            </div>
+            <div class="form-col">
+                <label class="field-label">Размер</label>
+                <input type="number" id="rule-fontsize" value="36">
+            </div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-col">
+                <label class="field-label">Цвет текста</label>
+                <div class="color-row">
+                    <input type="color" id="rule-fontcolor" value="#ffffff">
+                    <input type="text" id="rule-fontcolor-name" value="white" style="flex:1;">
+                </div>
+            </div>
+            <div class="form-col">
+                <label class="field-label">Скорость (пикс/сек)</label>
+                <input type="number" id="rule-speed" value="100">
+            </div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-col">
+                <label class="field-label">Повторов в час</label>
+                <input type="number" id="rule-repeats-hour" value="60" min="1" max="3600">
+            </div>
+            <div class="form-col">
+                <label class="field-label">Высота от низа</label>
+                <input type="number" id="rule-yoffset" value="50">
+            </div>
+        </div>
+
+        <div class="form-row" style="background: #1b1f26; padding: 10px; border-radius: 4px;">
+            <div class="form-col">
+                <label class="field-label">Подложка</label>
+                <input type="checkbox" id="rule-box" checked> Включить
+            </div>
+            <div class="form-col">
+                <label class="field-label">Цвет подложки</label>
+                <div class="color-row">
+                    <input type="color" id="rule-boxcolor" value="#000000">
+                    <input type="text" id="rule-boxcolor-name" value="black" style="flex:1;">
+                </div>
+            </div>
+            <div class="form-col">
+                <label class="field-label">Прозрачность</label>
+                <input type="range" id="rule-boxalpha" min="0" max="1" step="0.05" value="0.7"
+                       oninput="document.getElementById('rule-boxalpha-val').textContent=this.value">
+                <span id="rule-boxalpha-val" class="hint">0.7</span>
+            </div>
+        </div>
+
+        <div class="form-row" style="margin-top: 10px;">
+            <div class="form-col">
+                <label class="field-label">Дни недели</label>
+                <div class="days-picker">
+                    <label><input type="checkbox" value="0" class="rule-day"> Пн</label>
+                    <label><input type="checkbox" value="1" class="rule-day"> Вт</label>
+                    <label><input type="checkbox" value="2" class="rule-day"> Ср</label>
+                    <label><input type="checkbox" value="3" class="rule-day"> Чт</label>
+                    <label><input type="checkbox" value="4" class="rule-day"> Пт</label>
+                    <label><input type="checkbox" value="5" class="rule-day"> Сб</label>
+                    <label><input type="checkbox" value="6" class="rule-day"> Вс</label>
+                </div>
+            </div>
+            <div class="form-col">
+                <label class="field-label">Время</label>
+                <div class="time-picker">
+                    <input type="time" id="rule-start" value="00:00" class="time-input">
+                    <span class="time-sep">→</span>
+                    <input type="time" id="rule-end" value="23:59" class="time-input">
+                </div>
+            </div>
+        </div>
+
+        <div class="form-row" style="margin-top: 10px;">
+            <div class="form-col">
+                <label class="field-label">Дата начала</label>
+                <input type="date" id="rule-start-date">
+            </div>
+            <div class="form-col">
+                <label class="field-label">Дата конца</label>
+                <input type="date" id="rule-end-date">
+            </div>
+            <div class="form-col" style="display:flex; align-items:center; margin-top:20px;">
+                <label style="font-family:var(--mono); font-size:12px; cursor:pointer;">
+                    <input type="checkbox" id="rule-yearly"> Ежегодное
+                </label>
+            </div>
+        </div>
+
+        <div class="form-row" style="margin-top: 15px;">
+            <div class="form-col">
+                <label class="field-label">Каналы (только из рабочего плейлиста)</label>
+                <div id="rule-channels-list" class="rule-channels-list">
+                    <p class="hint">Загрузка...</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="actions" style="margin-top: 15px;">
+            <button type="button" id="btn-save-rule" class="btn btn--primary">💾 СОХРАНИТЬ</button>
+            <button type="button" id="btn-reset-rule" class="btn">Сброс</button>
+        </div>
+    </form>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--warn"></span>АКТИВНЫЕ ПРАВИЛА</h2>
+    <table>
+        <thead><tr><th>Статус</th><th>Название</th><th>Текст</th><th>Расписание</th><th>Каналы</th><th></th></tr></thead>
+        <tbody id="rules-body"></tbody>
+    </table>
+</section>
+
+<script src="{{ url_for('static', filename='js/overlay.js') }}"></script>
+{% endblock %}

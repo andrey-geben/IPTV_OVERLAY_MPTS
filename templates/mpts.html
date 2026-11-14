@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}MPTS — IPTV OVERLAY + MPTS{% endblock %}
+
+{% block content %}
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>1. ИСХОДНЫЙ ПЛЕЙЛИСТ</h2>
+    <p class="hint" id="playlist-meta">Загрузка...</p>
+
+    <div id="channels-panel" style="display:none; margin-top: 15px;">
+        <div class="actions" style="margin-bottom: 10px;">
+            <button id="btn-select-all" type="button" class="btn btn--small">✓ Все</button>
+            <button id="btn-deselect-all" type="button" class="btn btn--small">✗ Ничего</button>
+            <button id="btn-check-selected" type="button" class="btn btn--small">⟳ Проверить выбранные</button>
+            <span id="check-status" class="hint"></span>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th style="width:40px;">✓</th>
+                    <th style="width:50px;">Ст.</th>
+                    <th>Название</th>
+                    <th>URL</th>
+                    <th style="width:200px;">В группах</th>
+                </tr>
+            </thead>
+            <tbody id="channels-body"></tbody>
+        </table>
+    </div>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>2. СОЗДАТЬ ГРУППУ КАНАЛОВ</h2>
+    <form id="group-form">
+        <div class="form-row">
+            <div class="form-col">
+                <label class="field-label">Название группы</label>
+                <input type="text" id="group-name" value="Группа 1">
+            </div>
+            <div class="form-col">
+                <label class="field-label">Хост получателя (PBI)</label>
+                <input type="text" id="group-host" value="239.0.0.1">
+            </div>
+            <div class="form-col">
+                <label class="field-label">Порт</label>
+                <input type="number" id="group-port" value="5000" min="1" max="65535">
+            </div>
+        </div>
+        <div class="form-row" style="margin-top: 10px;">
+            <div class="form-col">
+                <label class="field-label">Сетевой интерфейс (исходящий IP)</label>
+                <select id="group-local-addr">
+                    <option value="">Автоматически (по умолчанию ОС)</option>
+                    <!-- Опции загрузятся через JS -->
+                </select>
+            </div>
+        </div>
+        <div class="actions" style="margin-top: 15px;">
+            <button type="button" id="btn-save-group" class="btn btn--primary">💾 СОХРАНИТЬ ГРУППУ</button>
+            <span class="hint">Выбранные каналы в таблице выше попадут в группу.</span>
+        </div>
+    </form>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--warn"></span>3. ГРУППЫ И ДАННЫЕ ДЛЯ PBI</h2>
+    <div id="groups-container"></div>
+</section>
+
+<script src="{{ url_for('static', filename='js/mpts.js') }}?v=9"></script>
+{% endblock %}

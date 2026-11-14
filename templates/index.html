@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}Разбор плейлиста — IPTV OVERLAY + MPTS{% endblock %}
+
+{% block content %}
+<section class="panel">
+    <h2 class="panel__title">
+        <span class="led {% if error %}led--err{% elif channels and channels|length > 0 %}led--on{% else %}led--pulse{% endif %}"></span>
+        M3U PARSER
+    </h2>
+
+    <form method="post" action="{{ url_for('parse_playlist_form') }}">
+        <label for="content" class="field-label">Входной плейлист</label>
+        <textarea id="content" name="content" rows="10" spellcheck="false"
+                  placeholder="#EXTM3U&#10;#EXTINF:-1 group-title=&quot;Кино&quot;,Первый канал&#10;http://example.com/1">{{ raw_content }}</textarea>
+
+        <div class="actions">
+            <button type="submit" class="btn btn--primary">▶ Разобрать</button>
+        </div>
+    </form>
+
+    {% if error %}
+        <div class="alert alert--error">
+            <span class="led led--err"></span>
+            {{ error }}
+        </div>
+    {% endif %}
+
+    {% if channels is not none %}
+        <div class="test-stripe"></div>
+
+        <div class="status-strip">
+            <span><span class="led led--on"></span>PARSED</span>
+            <span>CHANNELS: <span class="readout readout--sm">{{ channels|length }}</span></span>
+        </div>
+
+        {% if channels %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Название</th>
+                        <th>Группа</th>
+                        <th>tvg-id</th>
+                        <th>URL</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for ch in channels %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ ch.name }}</td>
+                        <td>{{ ch.group }}</td>
+                        <td>{{ ch.tvg_id }}</td>
+                        <td class="url">{{ ch.url }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p class="hint">Каналы не найдены. Проверь формат плейлиста.</p>
+        {% endif %}
+    {% endif %}
+</section>
+{% endblock %}

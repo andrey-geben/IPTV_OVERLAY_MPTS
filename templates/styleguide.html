@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+
+{% block title %}Styleguide — IPTV OVERLAY + MPTS{% endblock %}
+
+{% block content %}
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>PALETTE</h2>
+    <p class="hint">Дизайн-токены из <code>:root</code> в style.css. Использовать только через <code>var(--имя)</code>.</p>
+    <div class="swatches">
+        <div class="swatch"><div class="swatch__chip" style="background: var(--bg);"></div><span class="swatch__name">--bg</span></div>
+        <div class="swatch"><div class="swatch__chip" style="background: var(--bg-panel);"></div><span class="swatch__name">--bg-panel</span></div>
+        <div class="swatch"><div class="swatch__chip" style="background: var(--bg-panel-hi);"></div><span class="swatch__name">--bg-panel-hi</span></div>
+        <div class="swatch"><div class="swatch__chip" style="background: var(--bg-inset);"></div><span class="swatch__name">--bg-inset</span></div>
+        <div class="swatch"><div class="swatch__chip" style="background: var(--bezel-light);"></div><span class="swatch__name">--bezel-light</span></div>
+        <div class="swatch"><div class="swatch__chip" style="background: var(--text);"></div><span class="swatch__name">--text</span></div>
+        <div class="swatch"><div class="swatch__chip" style="background: var(--text-dim);"></div><span class="swatch__name">--text-dim</span></div>
+        <div class="swatch"><div class="swatch__chip" style="background: var(--text-bright);"></div><span class="swatch__name">--text-bright</span></div>
+        <div class="swatch"><div class="swatch__chip" style="background: var(--phosphor);"></div><span class="swatch__name">--phosphor</span></div>
+        <div class="swatch"><div class="swatch__chip" style="background: var(--amber);"></div><span class="swatch__name">--amber</span></div>
+        <div class="swatch"><div class="swatch__chip" style="background: var(--red);"></div><span class="swatch__name">--red</span></div>
+    </div>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>LED-INDICATORS</h2>
+    <div class="sg-block">
+        <div class="sg-row"><span class="sg-label">Off</span><span class="led"></span><span class="hint">класс <code>.led</code> — нет сигнала</span></div>
+        <div class="sg-row"><span class="sg-label">On</span><span class="led led--on"></span><span class="hint">класс <code>.led--on</code> — норма, в эфире</span></div>
+        <div class="sg-row"><span class="sg-label">Warn</span><span class="led led--warn"></span><span class="hint">класс <code>.led--warn</code> — предупреждение</span></div>
+        <div class="sg-row"><span class="sg-label">Error</span><span class="led led--err"></span><span class="hint">класс <code>.led--err</code> — авария, нет потока</span></div>
+        <div class="sg-row"><span class="sg-label">Pulse</span><span class="led led--on led--pulse"></span><span class="hint">класс <code>.led--pulse</code> — ожидание / активная работа</span></div>
+    </div>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>BUTTONS</h2>
+    <div class="sg-block">
+        <div class="sg-row">
+            <span class="sg-label">Default</span>
+            <button class="btn" type="button">Стандартная</button>
+            <span class="hint"><code>.btn</code></span>
+        </div>
+        <div class="sg-row">
+            <span class="sg-label">Primary</span>
+            <button class="btn btn--primary" type="button">▶ Пуск</button>
+            <span class="hint"><code>.btn.btn--primary</code></span>
+        </div>
+        <div class="sg-row">
+            <span class="sg-label">Danger</span>
+            <button class="btn btn--danger" type="button">■ Стоп</button>
+            <span class="hint"><code>.btn.btn--danger</code></span>
+        </div>
+    </div>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>READOUTS</h2>
+    <div class="sg-row">
+        <span class="sg-label">Normal</span>
+        <span class="readout">BITRATE 12.4 Mbps</span>
+        <span class="hint"><code>.readout</code> — фосфорное табло</span>
+    </div>
+    <div class="sg-row">
+        <span class="sg-label">Small</span>
+        <span class="readout readout--sm">42</span>
+        <span class="hint"><code>.readout.readout--sm</code></span>
+    </div>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>STATUS STRIP</h2>
+    <div class="status-strip">
+        <span><span class="led led--on"></span>SYSTEM</span>
+        <span><span class="led led--warn"></span>STREAM</span>
+        <span><span class="led led--err"></span>DISK</span>
+        <span>CHANNELS: <span class="readout readout--sm">12</span></span>
+    </div>
+    <p class="hint">Компонент <code>.status-strip</code> — строка индикаторов. LED и табло комбинируются.</p>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>TEST STRIPE</h2>
+    <p class="hint"><code>.test-stripe</code> — SMPTE-полоса, разделитель и «сигнал жив».</p>
+    <div class="test-stripe"></div>
+    <div class="test-stripe"></div>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>ALERTS</h2>
+    <div class="alert alert--ok">
+        <span class="led led--on"></span>
+        MPTS запущен, 14 потоков в норме.
+    </div>
+    <div class="alert alert--error">
+        <span class="led led--err"></span>
+        FFmpeg завершился с кодом 1. Проверьте входной URL.
+    </div>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>FORMS</h2>
+    <div class="sg-block">
+        <label class="field-label" for="sg-text">Text input</label>
+        <input id="sg-text" type="text" value="192.168.1.10">
+    </div>
+    <div class="sg-block">
+        <label class="field-label" for="sg-num">Number</label>
+        <input id="sg-num" type="number" value="5000">
+    </div>
+    <div class="sg-block">
+        <label class="field-label" for="sg-sel">Select</label>
+        <select id="sg-sel">
+            <option>MPEG-TS / UDP</option>
+            <option>MPEG-TS / RTP</option>
+            <option>HLS</option>
+        </select>
+    </div>
+    <div class="sg-block">
+        <label class="field-label" for="sg-ta">Textarea</label>
+        <textarea id="sg-ta" rows="3">#EXTM3U
+#EXTINF:-1 group-title="Кино",Пример
+http://example.com/1</textarea>
+    </div>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>TABLE</h2>
+    <table>
+        <thead>
+            <tr><th>#</th><th>Канал</th><th>Статус</th><th>Битрейт</th></tr>
+        </thead>
+        <tbody>
+            <tr><td>1</td><td>Первый</td><td><span class="led led--on"></span> OK</td><td>6.8 Mbps</td></tr>
+            <tr><td>2</td><td>Матч ТВ</td><td><span class="led led--warn"></span> LOW</td><td>2.1 Mbps</td></tr>
+            <tr><td>3</td><td>Cinema HD</td><td><span class="led led--err"></span> OFFLINE</td><td>—</td></tr>
+        </tbody>
+    </table>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>TYPOGRAPHY</h2>
+    <p><strong>Обычный текст</strong> — системный sans. Для интерфейсных надписей и абзацев.</p>
+    <p class="hint">Подсказка — <code>.hint</code>. Моноширинный, приглушённый. Для служебных пометок.</p>
+    <h2 class="panel__title" style="margin-top:20px;"><span class="led led--on"></span>Пример заголовка панели</h2>
+    <p>Заголовок панели — <code>.panel__title</code>. Янтарный, широкий трекинг, UPPERCASE.</p>
+</section>
+
+{% endblock %}

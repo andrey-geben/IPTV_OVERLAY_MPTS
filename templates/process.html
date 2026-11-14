@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}Process — IPTV OVERLAY + MPTS{% endblock %}
+
+{% block content %}
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>PROCESS CONTROL — test_ffmpeg</h2>
+
+    <!-- Большой индикатор состояния + текстовое пояснение -->
+    <div class="status-hero">
+        <span id="proc-led" class="led led--big"></span>
+        <span id="proc-status-text" class="status-hero__text">STATUS: <span class="hint">загрузка…</span></span>
+    </div>
+
+    <!-- Фосфорные табло с цифрами -->
+    <div class="process-readouts">
+        <div class="readout-box">
+            <span class="readout-box__label">PID</span>
+            <span id="ro-pid" class="readout-box__value">—</span>
+        </div>
+        <div class="readout-box">
+            <span class="readout-box__label">UPTIME</span>
+            <span id="ro-uptime" class="readout-box__value">—</span>
+        </div>
+        <div class="readout-box">
+            <span class="readout-box__label">CPU %</span>
+            <span id="ro-cpu" class="readout-box__value">—</span>
+        </div>
+        <div class="readout-box">
+            <span class="readout-box__label">MEM MB</span>
+            <span id="ro-mem" class="readout-box__value">—</span>
+        </div>
+    </div>
+
+    <!-- Команда, с которой запускается процесс -->
+    <div class="process-command">
+        <span class="field-label">Command</span>
+        <code id="proc-command" class="process-command__text">—</code>
+    </div>
+
+    <!-- Кнопки управления -->
+    <div class="actions process-actions">
+        <button id="btn-start" type="button" class="btn btn--primary btn--big">▶ ПУСК</button>
+        <button id="btn-stop" type="button" class="btn btn--danger btn--big">■ СТОП</button>
+    </div>
+
+    <div id="proc-error" class="alert alert--error" style="display:none;">
+        <span class="led led--err"></span>
+        <span id="proc-error-text"></span>
+    </div>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--warn"></span>LOG — последние 60 строк</h2>
+    <div class="actions">
+        <button id="btn-log-refresh" type="button" class="btn">⟲ Обновить лог</button>
+        <span id="log-meta" class="hint">—</span>
+    </div>
+    <pre id="log-view" class="log-view">Нажми «Обновить лог», чтобы увидеть последние строки.</pre>
+</section>
+
+<script src="{{ url_for('static', filename='js/process.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}{{ config.APP_NAME }}{% endblock %}</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div class="topbar__brand">
+            <span class="led led--on led--pulse"></span>
+            {{ config.APP_NAME }}
+        </div>
+
+        <nav class="topnav">
+            <a href="{{ url_for('playlist_page') }}"
+               class="topnav__link {% if request.endpoint == 'playlist_page' %}is-active{% endif %}">1. PLAYLIST</a>
+            <a href="{{ url_for('mpts_page') }}"
+               class="topnav__link {% if request.endpoint == 'mpts_page' %}is-active{% endif %}">2. MPTS</a>
+            <a href="{{ url_for('mosaic_page') }}"
+               class="topnav__link {% if request.endpoint == 'mosaic_page' %}is-active{% endif %}">3. MOSAIC</a>
+            <a href="{{ url_for('overlay_page') }}"
+               class="topnav__link {% if request.endpoint == 'overlay_page' %}is-active{% endif %}">4. OVERLAY</a>
+            <a href="{{ url_for('process_page') }}"
+               class="topnav__link {% if request.endpoint == 'process_page' %}is-active{% endif %}">PROCESS</a>
+            <a href="{{ url_for('styleguide') }}"
+               class="topnav__link {% if request.endpoint == 'styleguide' %}is-active{% endif %}">STYLE</a>
+            <a href="{{ url_for('about_page') }}"
+               class="topnav__link {% if request.endpoint == 'about_page' %}is-active{% endif %}">ABOUT</a>
+        </nav>
+
+        <div class="status-strip">
+            <div style="display:flex; gap:4px;">
+                <button id="btn-emergency-stop" class="btn btn--danger btn--small"
+                        title="Аварийная остановка всех FFmpeg-процессов">⏹ STOP</button>
+                <button id="btn-restart-all" class="btn btn--amber btn--small"
+                        title="Перезапуск всех FFmpeg-процессов">🔄 RESTART</button>
+            </div>
+            {% if session.get('user') %}
+            <span class="user-badge" title="Вы вошли как {{ session.user.username }}">
+                <span class="led led--on"></span>{{ session.user.username }}
+            </span>
+            <a href="{{ url_for('logout_page') }}" class="btn btn--small" style="text-decoration:none;">ВЫЙТИ</a>
+            {% endif %}
+            <span><span class="led led--on"></span>SYSTEM</span>
+            <span><span id="led-test_ffmpeg" class="led"></span>TEST</span>
+            <span><span id="led-mpts" class="led"></span>MPTS</span>
+            <span id="clock">--:--:--</span>
+        </div>
+    </header>
+
+    <div class="test-stripe"></div>
+
+    {% if session.get('user') and session.user.must_change_password and request.endpoint != 'about_page' %}
+    <div class="container" style="margin-top:16px;">
+        <div class="alert alert--error">
+            <span class="led led--err led--pulse"></span>
+            Вы используете пароль по умолчанию. <a href="{{ url_for('about_page') }}#password" style="color:inherit;text-decoration:underline;">Смените его</a>.
+        </div>
+    </div>
+    {% endif %}
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="site-footer">
+        <span>© {{ current_year }} {{ config.AUTHOR }}</span>
+        <span class="site-footer__sep">·</span>
+        <a href="{{ config.AUTHOR_URL }}" target="_blank" rel="noopener">{{ config.PROJECT_URL.split('//')[-1] }}</a>
+        <span class="site-footer__sep">·</span>
+        <span>v{{ config.VERSION }}</span>
+        <span class="site-footer__sep">·</span>
+        <span>{{ config.LICENSE_NAME }}</span>
+        <span class="site-footer__sep">·</span>
+        <a href="{{ url_for('about_page') }}">О программе</a>
+    </footer>
+
+    <script>
+        (function tick() {
+            const p = n => String(n).padStart(2, "0");
+            const d = new Date();
+            document.getElementById("clock").textContent =
+                `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+            setTimeout(tick, 1000);
+        })();
+
+        async function pollLeds() {
+            if (!document.hidden) {
+                try {
+                    const r = await fetch("/api/process/status");
+                    if (r.status === 401) { window.location.href = "/login"; return; }
+                    const data = await r.json();
+                    const procs = (data && data.processes) || {};
+                    for (const [name, st] of Object.entries(procs)) {
+                        const led = document.getElementById("led-" + name);
+                        if (led) {
+                            led.className = st.running ? "led led--on led--pulse" : "led";
+                        }
+                    }
+                } catch (e) { /* тихо */ }
+            }
+            setTimeout(pollLeds, 3000);
+        }
+                // Аварийная остановка
+        const emergencyBtn = document.getElementById("btn-emergency-stop");
+        if (emergencyBtn) {
+            emergencyBtn.addEventListener("click", async () => {
+                if (!confirm("⚠ АВАРИЙНАЯ ОСТАНОВКА\n\nБудут остановлены ВСЕ FFmpeg-процессы (Overlay, MPTS, превью).\n\nСетка вещания PBI ПРЕРВЁТСЯ.\n\nПродолжить?")) return;
+                emergencyBtn.disabled = true;
+                const t = emergencyBtn.textContent;
+                emergencyBtn.textContent = "⏳...";
+                try {
+                    const r = await fetch("/api/process/stop-all", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ aggressive: true })
+                    });
+                    const data = await r.json();
+                    alert(data.message || "Готово");
+                } catch (e) {
+                    alert("Ошибка: " + e.message);
+                } finally {
+                    emergencyBtn.disabled = false;
+                    emergencyBtn.textContent = t;
+                    setTimeout(() => { if (!document.hidden) location.reload(); }, 1200);
+                }
+            });
+        }
+
+        // Перезапуск
+        const restartBtn = document.getElementById("btn-restart-all");
+        if (restartBtn) {
+            restartBtn.addEventListener("click", async () => {
+                if (!confirm("🔄 ПЕРЕЗАПУСК ВСЕХ ПРОЦЕССОВ\n\nБудут перезапущены:\n• Все overlay-прокси\n• Все MPTS-группы (которые были запущены)\n\nПревью мозаики и test FFmpeg будут остановлены.\n\nЭто займёт 10–20 секунд.\n\nПродолжить?")) return;
+                restartBtn.disabled = true;
+                const t = restartBtn.textContent;
+                restartBtn.textContent = "⏳...";
+                try {
+                    const r = await fetch("/api/process/restart-all", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({})
+                    });
+                    const data = await r.json();
+                    alert(data.message || "Готово");
+                } catch (e) {
+                    alert("Ошибка: " + e.message);
+                } finally {
+                    restartBtn.disabled = false;
+                    restartBtn.textContent = t;
+                    setTimeout(() => { if (!document.hidden) location.reload(); }, 800);
+                }
+            });
+        }
+        pollLeds();
+    </script>
+</body>
+</html>

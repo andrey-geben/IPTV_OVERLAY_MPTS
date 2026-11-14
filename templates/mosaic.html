@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Мозаика — {{ config.APP_NAME }}{% endblock %}
+
+{% block content %}
+
+<div class="mosaic-layout">
+    <!-- Панель источников -->
+    <aside class="panel mosaic-sidebar">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; border-bottom:1px solid var(--bezel-light); padding-bottom:10px;">
+            <h2 class="panel__title" style="margin:0; border:none; padding:0;"><span class="led led--on"></span>ИСТОЧНИКИ</h2>
+            <div style="display:flex; gap:4px;">
+                <button class="btn btn--small" id="mosaic-select-all" title="Выбрать все">✓ Все</button>
+                <button class="btn btn--small" id="mosaic-deselect-all" title="Снять выбор">✗ Ничего</button>
+                <button class="btn btn--small" id="mosaic-refresh" title="Обновить список">⟳</button>
+            </div>
+        </div>
+
+        <div id="sources-list" class="sources-list">
+            <p class="hint">Загрузка...</p>
+        </div>
+
+        <div class="test-stripe"></div>
+
+        <h3 class="field-label">Режим просмотра</h3>
+        <div class="actions" style="margin-bottom:12px;">
+            <button class="btn btn--small mosaic-mode-btn is-active" data-mode="mosaic">▦ Мозаика</button>
+            <button class="btn btn--small mosaic-mode-btn" data-mode="single">▢ Один</button>
+        </div>
+
+        <h3 class="field-label">Размер сетки</h3>
+        <div class="actions">
+            <button class="btn btn--small mosaic-grid-btn" data-grid="1">1×1</button>
+            <button class="btn btn--small mosaic-grid-btn is-active" data-grid="2">2×2</button>
+            <button class="btn btn--small mosaic-grid-btn" data-grid="3">3×3</button>
+            <button class="btn btn--small mosaic-grid-btn" data-grid="4">4×4</button>
+        </div>
+
+        <div class="actions" style="margin-top:15px; display:none;" id="mosaic-pager">
+            <button class="btn btn--small" id="mosaic-prev">◀</button>
+            <span id="mosaic-page-info" class="readout readout--sm">1 / 1</span>
+            <button class="btn btn--small" id="mosaic-next">▶</button>
+        </div>
+    </aside>
+
+    <!-- Область просмотра -->
+    <main class="panel mosaic-main">
+        <div id="single-view" class="single-view" style="display:none;">
+            <div class="single-view__head">
+                <span id="single-view-name" class="readout">—</span>
+                <button class="btn btn--small" id="single-view-close">✗ Закрыть</button>
+            </div>
+            <div id="single-view-video-wrap" class="single-view__video-wrap"></div>
+        </div>
+
+        <div id="mosaic-grid" class="mosaic-grid" data-grid="2">
+            <p class="hint" style="grid-column:1/-1; text-align:center; padding:40px;">
+                Загрузка источников...
+            </p>
+        </div>
+    </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script src="{{ url_for('static', filename='js/mosaic.js') }}?v=10"></script>
+{% endblock %}
