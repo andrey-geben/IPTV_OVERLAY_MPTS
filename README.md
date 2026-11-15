@@ -494,7 +494,7 @@ python _check_builder.py     # команда MPTS
 **Тестовый плейлист** (реальный сервер в локальной сети):
 ```
 #EXTINF:-1 tvg-id="2" group-title="Эфирные", Первый канал
-http://10.24.0.151/Pervyi_kanal/index.m3u8
+http://000.000.000.000/Pervyi_kanal/index.m3u8
 ```
 Если тестовый сервер недоступен — используй `https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8`.
 
