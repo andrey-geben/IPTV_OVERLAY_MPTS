@@ -5,6 +5,7 @@ let gridSize = 2;
 let viewMode = "mosaic";
 let singleViewId = null;
 const players = new Map();
+let isLoadingSources = false;
 
 function escapeHtml(s) {
     return String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -12,9 +13,6 @@ function escapeHtml(s) {
     }[c]));
 }
 
-// ============================================================
-// Сравнение источников (по id + url)
-// ============================================================
 function sourcesDiffer(a, b) {
     if (a.length !== b.length) return true;
     for (let i = 0; i < a.length; i++) {
@@ -25,9 +23,6 @@ function sourcesDiffer(a, b) {
     return false;
 }
 
-// ============================================================
-// Боковая панель
-// ============================================================
 function renderSidebar() {
     const list = document.getElementById("sources-list");
     if (!list) return;
@@ -64,7 +59,7 @@ function renderSidebar() {
         }
 
         const viewBtn = src.url
-            ? `<button class="btn btn--small" onclick="openSingle('${src.id}')">▢</button>` : "";
+            ? `<button class="btn btn--small" onclick="openSingle('${src.id}')" title="Открыть в одиночном режиме">▢</button>` : "";
         const stopBtn = ((src.type === "mpts_group" && src.preview_running)
             ? `<button class="btn btn--small" onclick="stopPreview('${src.id.replace("mpts_","")}', event)">■</button>`
             : (src.type === "raw_channel" && src.preview_running)
@@ -90,10 +85,6 @@ function renderSidebar() {
     });
 }
 
-// ============================================================
-// Загрузка (однократная, без наложения)
-// ============================================================
-let isLoadingSources = false;
 async function loadSources() {
     if (isLoadingSources) return;
     isLoadingSources = true;
@@ -122,13 +113,9 @@ async function loadSources() {
         console.error("Failed to load sources:", e);
     } finally {
         isLoadingSources = false;
-        setTimeout(loadSources, 10000); // ✅ планируем следующий вызов только после завершения
     }
 }
 
-// ============================================================
-// Рендер области просмотра
-// ============================================================
 function renderView() {
     if (viewMode === "single" && singleViewId) renderSingle();
     else renderMosaic();
@@ -157,7 +144,6 @@ function renderMosaic() {
     const pageItems = selected.slice(start, start + perPage);
     const neededKeys = new Set(pageItems.map(s => s.id));
 
-    // 1. Удаляем плееры, которых больше нет на странице
     for (const [key, player] of players.entries()) {
         if (!neededKeys.has(key)) {
             if (player.hls) player.hls.destroy();
@@ -166,18 +152,14 @@ function renderMosaic() {
         }
     }
 
-    // 2. Очищаем grid (без удаления video из DOM — они переедут обратно)
     while (grid.firstChild) grid.removeChild(grid.firstChild);
 
-    // 3. Добавляем нужные ячейки
     pageItems.forEach(src => {
         let player = players.get(src.id);
 
         if (player && player.url === src.url) {
-            // Плеер уже работает — переиспользуем ячейку
             grid.appendChild(player.cell);
         } else {
-            // Создаём новую
             if (player) {
                 if (player.hls) player.hls.destroy();
                 if (player.cell && player.cell.parentElement) player.cell.remove();
@@ -244,22 +226,13 @@ function renderSingle() {
     attachPlayer(video, src.url, src.id);
 }
 
-// ============================================================
-// hls.js — live
-// ============================================================
 function attachPlayer(videoEl, hlsUrl, key) {
     if (typeof Hls !== "undefined" && Hls.isSupported()) {
         const hls = new Hls({
-            liveSyncDurationCount: 3,
-            liveMaxLatencyDurationCount: 10,
-            startPosition: -1,
-            maxBufferLength: 10,
-            maxMaxBufferLength: 20,
-            manifestLoadingMaxRetry: 3,
-            manifestLoadingRetryDelay: 1000,
-            levelLoadingMaxRetry: 3,
-            fragLoadingMaxRetry: 3,
-            fragLoadingRetryDelay: 1000,
+            liveSyncDurationCount: 3, liveMaxLatencyDurationCount: 10,
+            startPosition: -1, maxBufferLength: 10, maxMaxBufferLength: 20,
+            manifestLoadingMaxRetry: 3, manifestLoadingRetryDelay: 1000,
+            levelLoadingMaxRetry: 3, fragLoadingMaxRetry: 3, fragLoadingRetryDelay: 1000,
         });
         hls.loadSource(hlsUrl + "?t=" + Date.now());
         hls.attachMedia(videoEl);
@@ -284,15 +257,22 @@ function destroyAllPlayers() {
     players.clear();
 }
 
-// ============================================================
-// Превью
-// ============================================================
 async function startPreview(groupId, evt) {
     if (evt) evt.preventDefault();
     try {
         const r = await fetch(`/api/mosaic/preview/${groupId}/start`, { method: "POST" });
         const data = await r.json();
-        if (!data.ok) { alert("Ошибка: " + data.error); return; }
+        if (!data.ok) {
+            // Если ошибка "Сначала запустите MPTS-поток" — ведём пользователя на /mpts
+            if (data.error && data.error.includes("Сначала запустите")) {
+                if (confirm("MPTS-поток не запущен.\n\nПерейти на страницу MPTS, чтобы запустить его?")) {
+                    window.location.href = "/mpts";
+                }
+                return;
+            }
+            alert("Ошибка: " + data.error);
+            return;
+        }
         setTimeout(loadSources, 3000);
     } catch (e) { alert(e.message); }
 }
@@ -316,10 +296,12 @@ async function stopChannelPreview(chId, evt) {
     setTimeout(loadSources, 500);
 }
 
-// ============================================================
-// Одиночный режим
-// ============================================================
 function openSingle(sourceId) {
+    const src = allSources.find(s => s.id === sourceId);
+    if (!src || !src.url) {
+        alert("Источник недоступен. Сначала запустите MPTS-поток и включите превью (кнопка ▶).");
+        return;
+    }
     singleViewId = sourceId;
     viewMode = "single";
     document.querySelectorAll(".mosaic-mode-btn").forEach(b => {
@@ -367,20 +349,16 @@ const btnSelectAll = document.getElementById("mosaic-select-all");
 if (btnSelectAll) btnSelectAll.addEventListener("click", () => {
     allSources.forEach(s => selectedIds.add(s.id)); renderSidebar(); renderView();
 });
-
 const btnDeselectAll = document.getElementById("mosaic-deselect-all");
 if (btnDeselectAll) btnDeselectAll.addEventListener("click", () => {
     selectedIds.clear(); renderSidebar(); renderView();
 });
-
 const btnRefresh = document.getElementById("mosaic-refresh");
 if (btnRefresh) btnRefresh.addEventListener("click", loadSources);
-
 const btnPrev = document.getElementById("mosaic-prev");
 if (btnPrev) btnPrev.addEventListener("click", () => {
     if (currentPage > 0) { currentPage--; renderView(); }
 });
-
 const btnNext = document.getElementById("mosaic-next");
 if (btnNext) btnNext.addEventListener("click", () => {
     const selected = allSources.filter(s => selectedIds.has(s.id) && s.url);
@@ -395,7 +373,13 @@ window.stopPreview = stopPreview;
 window.startChannelPreview = startChannelPreview;
 window.stopChannelPreview = stopChannelPreview;
 
-// ============================================================
-// Старт
-// ============================================================
+// WebSocket: обновление списка источников (вместо polling)
+if (window.socket) {
+    window.socket.on("update", () => {
+        loadSources();
+    });
+} else {
+    setInterval(() => { if (!document.hidden) loadSources(); }, 10000);
+}
+
 loadSources();

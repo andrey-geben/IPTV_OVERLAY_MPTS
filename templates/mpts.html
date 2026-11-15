@@ -47,13 +47,18 @@
                 <input type="number" id="group-port" value="5000" min="1" max="65535">
             </div>
         </div>
+        <!-- -----подсказка: чекбокс для автозапуска при перезагрузке сервера----- -->
         <div class="form-row" style="margin-top: 10px;">
             <div class="form-col">
                 <label class="field-label">Сетевой интерфейс (исходящий IP)</label>
                 <select id="group-local-addr">
                     <option value="">Автоматически (по умолчанию ОС)</option>
-                    <!-- Опции загрузятся через JS -->
                 </select>
+            </div>
+            <div class="form-col" style="display:flex; align-items:center; margin-top:20px;">
+                <label style="font-family:var(--mono); font-size:12px; cursor:pointer;">
+                    <input type="checkbox" id="group-auto-start"> Автозапуск при старте
+                </label>
             </div>
         </div>
         <div class="actions" style="margin-top: 15px;">

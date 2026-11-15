@@ -78,84 +78,52 @@
         <a href="{{ url_for('about_page') }}">О программе</a>
     </footer>
 
-    <script>
-        (function tick() {
-            const p = n => String(n).padStart(2, "0");
-            const d = new Date();
-            document.getElementById("clock").textContent =
-                `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-            setTimeout(tick, 1000);
-        })();
+ <!-- Socket.IO клиент -->
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 
-        async function pollLeds() {
-            if (!document.hidden) {
-                try {
-                    const r = await fetch("/api/process/status");
-                    if (r.status === 401) { window.location.href = "/login"; return; }
-                    const data = await r.json();
-                    const procs = (data && data.processes) || {};
-                    for (const [name, st] of Object.entries(procs)) {
-                        const led = document.getElementById("led-" + name);
-                        if (led) {
-                            led.className = st.running ? "led led--on led--pulse" : "led";
-                        }
-                    }
-                } catch (e) { /* тихо */ }
+<script>
+    // Часы
+    (function tick() {
+        const p = n => String(n).padStart(2, "0");
+        const d = new Date();
+        document.getElementById("clock").textContent =
+            `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+        setTimeout(tick, 1000);
+    })();
+
+    // WebSocket подключение
+    const socket = io({ transports: ["polling"] });
+    window.socket = socket;
+
+    socket.on("connect", () => {
+        console.log("[ws] connected");
+        const led = document.getElementById("ws-led");
+        if (led) led.className = "led led--on";
+    });
+
+    socket.on("disconnect", () => {
+        console.log("[ws] disconnected");
+        const led = document.getElementById("ws-led");
+        if (led) led.className = "led led--err led--pulse";
+    });
+
+    // Обновление LED-индикаторов в шапке
+    socket.on("update", (data) => {
+        if (data.processes) {
+            // Обновляем LED-индикаторы test_ffmpeg и mpts
+            const testLed = document.getElementById("led-test_ffmpeg");
+            if (testLed) {
+                const st = data.processes["test_ffmpeg"];
+                testLed.className = st && st.running ? "led led--on led--pulse" : "led";
             }
-            setTimeout(pollLeds, 3000);
+            const mptsLed = document.getElementById("led-mpts");
+            if (mptsLed) {
+                // Проверяем, есть ли хотя бы одна запущенная MPTS-группа
+                const anyMptsRunning = Object.values(data.mpts || {}).some(st => st.running);
+                mptsLed.className = anyMptsRunning ? "led led--on led--pulse" : "led";
+            }
         }
-                // Аварийная остановка
-        const emergencyBtn = document.getElementById("btn-emergency-stop");
-        if (emergencyBtn) {
-            emergencyBtn.addEventListener("click", async () => {
-                if (!confirm("⚠ АВАРИЙНАЯ ОСТАНОВКА\n\nБудут остановлены ВСЕ FFmpeg-процессы (Overlay, MPTS, превью).\n\nСетка вещания PBI ПРЕРВЁТСЯ.\n\nПродолжить?")) return;
-                emergencyBtn.disabled = true;
-                const t = emergencyBtn.textContent;
-                emergencyBtn.textContent = "⏳...";
-                try {
-                    const r = await fetch("/api/process/stop-all", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ aggressive: true })
-                    });
-                    const data = await r.json();
-                    alert(data.message || "Готово");
-                } catch (e) {
-                    alert("Ошибка: " + e.message);
-                } finally {
-                    emergencyBtn.disabled = false;
-                    emergencyBtn.textContent = t;
-                    setTimeout(() => { if (!document.hidden) location.reload(); }, 1200);
-                }
-            });
-        }
-
-        // Перезапуск
-        const restartBtn = document.getElementById("btn-restart-all");
-        if (restartBtn) {
-            restartBtn.addEventListener("click", async () => {
-                if (!confirm("🔄 ПЕРЕЗАПУСК ВСЕХ ПРОЦЕССОВ\n\nБудут перезапущены:\n• Все overlay-прокси\n• Все MPTS-группы (которые были запущены)\n\nПревью мозаики и test FFmpeg будут остановлены.\n\nЭто займёт 10–20 секунд.\n\nПродолжить?")) return;
-                restartBtn.disabled = true;
-                const t = restartBtn.textContent;
-                restartBtn.textContent = "⏳...";
-                try {
-                    const r = await fetch("/api/process/restart-all", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({})
-                    });
-                    const data = await r.json();
-                    alert(data.message || "Готово");
-                } catch (e) {
-                    alert("Ошибка: " + e.message);
-                } finally {
-                    restartBtn.disabled = false;
-                    restartBtn.textContent = t;
-                    setTimeout(() => { if (!document.hidden) location.reload(); }, 800);
-                }
-            });
-        }
-        pollLeds();
-    </script>
+    });
+</script>
 </body>
 </html>

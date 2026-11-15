@@ -35,6 +35,8 @@ function getSelectedUrls() {
 
 // ---------- Загрузка конфигурации ----------
 async function loadConfig() {
+    // -----подсказка------------
+    // Подгружаем сетевые интерфейсы только один раз при загрузке страницы
     if (!window.interfacesLoaded) {
         try {
             const ir = await fetch("/api/network/interfaces");
@@ -173,10 +175,18 @@ function renderGroups() {
             return `<div>Program ${idx + 1}: ${escapeHtml(ch ? ch.name : "Unknown")}</div>`;
         }).join("");
 
+        // -----подсказка------------
+        // Если группа помечена как auto_start, показываем специальный бейдж
+        const autoStartBadge = g.auto_start
+            ? '<span class="group-badge" style="background:rgba(255, 59, 48, 0.2); border-color:var(--red); color:var(--red);">AUTO-START</span>'
+            : '';
+
         card.innerHTML = `
             <div style="display:flex; justify-content:space-between; align-items:start; gap:12px;">
                 <div>
-                    <h3 style="margin:0; color:var(--amber); font-family:var(--mono);">${escapeHtml(g.name)}</h3>
+                    <h3 style="margin:0; color:var(--amber); font-family:var(--mono);">
+                        ${escapeHtml(g.name)} ${autoStartBadge}
+                    </h3>
                     <p class="hint">Каналов: ${g.channel_urls.length} | UDP: ${escapeHtml(g.host)}:${g.port} ${g.local_addr ? '| IF: ' + escapeHtml(g.local_addr) : ''}</p>
                 </div>
                 <div class="actions">
@@ -233,10 +243,7 @@ async function startGroup(id) {
     let data = await r.json();
 
     if (!data.ok && data.require_confirm) {
-        if (!confirm(data.warning)) {
-            refreshStatuses();
-            return;
-        }
+        if (!confirm(data.warning)) { refreshStatuses(); return; }
         const r2 = await fetch(`/api/mpts/groups/${id}/start`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -245,7 +252,14 @@ async function startGroup(id) {
         data = await r2.json();
     }
 
-    if (!data.ok) alert(data.error || "Ошибка запуска");
+    // -----подсказка------------
+    // Если бэкенд вернул ошибку, выводим alert и НЕ обновляем статус сразу,
+    // чтобы панель не моргала
+    if (!data.ok) {
+        alert("Ошибка запуска MPTS:\n" + (data.error || "Неизвестная ошибка"));
+        return;
+    }
+
     refreshStatuses();
 }
 
@@ -455,7 +469,14 @@ document.getElementById("btn-save-group")?.addEventListener("click", async () =>
         const port = parseInt(document.getElementById("group-port").value);
         const localAddr = document.getElementById("group-local-addr") ? document.getElementById("group-local-addr").value : "";
 
-        const payload = { name, host, port, local_addr: localAddr, channel_urls: urls, force: false };
+        // -----подсказка------------
+        // Считываем галочку «Автозапуск при старте»
+        const autoStart = document.getElementById("group-auto-start") ? document.getElementById("group-auto-start").checked : false;
+
+        const payload = {
+            name, host, port, local_addr: localAddr, channel_urls: urls, force: false,
+            auto_start: autoStart
+        };
 
         let r = await fetch("/api/mpts/groups", {
             method: "POST",
@@ -553,8 +574,74 @@ document.getElementById("btn-restart-all")?.addEventListener("click", async () =
     }
 });
 
-// ---------- Автообновление ----------
-setInterval(() => { if (!document.hidden) { refreshStatuses(); refreshMonitor(); } }, 2500);
+// ---------- Автообновление (WebSocket) ----------
+// -----подсказка------------
+// Если сокет подключен, слушаем события update, иначе fallback на setInterval
+if (window.socket) {
+    window.socket.on("update", (data) => {
+        if (data.mpts) {
+            allGroups.forEach(g => {
+                const st = data.mpts[g.id] || {};
+                const pbiBlock = document.getElementById(`pbi-${g.id}`);
+                const monitorBtn = document.getElementById(`btn-monitor-${g.id}`);
+                if (st.running) {
+                    if (pbiBlock) pbiBlock.style.display = "block";
+                    if (monitorBtn) monitorBtn.style.display = "inline-block";
+                } else {
+                    if (pbiBlock) pbiBlock.style.display = "none";
+                    if (monitorBtn) monitorBtn.style.display = "none";
+                }
+            });
+        }
+        if (data.monitors) {
+            for (const gId of monitoringGroups) {
+                const mon = data.monitors[gId];
+                const panel = document.getElementById(`monitor-${gId}`);
+                if (!panel) continue;
+
+                if (!mon) {
+                    panel.innerHTML = '<span class="hint">Поток остановлен.</span>';
+                    continue;
+                }
+
+                panel.innerHTML = `
+                    <div class="monitor-grid">
+                        <div class="monitor-cell"><span class="monitor-label">UPTIME</span><span class="monitor-value">${formatUptime(mon.uptime_sec)}</span></div>
+                        <div class="monitor-cell"><span class="monitor-label">FRAME</span><span class="monitor-value">${mon.frame}</span></div>
+                        <div class="monitor-cell"><span class="monitor-label">FPS</span><span class="monitor-value">${mon.fps}</span></div>
+                        <div class="monitor-cell"><span class="monitor-label">ENC BITRATE</span><span class="monitor-value">${mon.bitrate}</span></div>
+                        <div class="monitor-cell"><span class="monitor-label">NET RATE</span><span class="monitor-value">${mon.net_rate_mbps != null ? mon.net_rate_mbps + " Mbps" : "—"}</span></div>
+                        <div class="monitor-cell"><span class="monitor-label">NET SENT</span><span class="monitor-value">${mon.net_sent_mb != null ? mon.net_sent_mb + " MB" : "—"}</span></div>
+                        <div class="monitor-cell"><span class="monitor-label">SPEED</span><span class="monitor-value">${mon.speed}</span></div>
+                        <div class="monitor-cell"><span class="monitor-label">DROPS</span><span class="monitor-value">${mon.drop_frames}</span></div>
+                    </div>
+                    <div style="margin-top:10px; display:flex; gap:10px; align-items:center;">
+                        <button class="btn btn--small" onclick="validateStream('${gId}')">🔍 ПРОВЕРИТЬ ПОТОК</button>
+                        <span id="validate-status-${gId}" class="hint"></span>
+                    </div>
+                    <div id="validate-result-${gId}" style="margin-top:10px;"></div>
+                `;
+                // Обновляем TS Bitrate в PBI
+                if (mon.bitrate && mon.bitrate !== "—") {
+                    const match = mon.bitrate.match(/([\d.]+)/);
+                    if (match) {
+                        const mbps = (parseFloat(match[1]) / 1000).toFixed(1);
+                        const bitrateInput = document.getElementById(`pbi-bitrate-${gId}`);
+                        if (bitrateInput) bitrateInput.value = mbps;
+                    }
+                }
+            }
+        }
+    });startGroup
+} else {
+    // Fallback на случай, если сокет не подключился
+    setInterval(() => {
+        if (!document.hidden) {
+            refreshStatuses();
+            refreshMonitor();
+        }
+    }, 2500);
+}
 
 // ---------- Инициализация ----------
 loadConfig();

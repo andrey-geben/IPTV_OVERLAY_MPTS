@@ -1,18 +1,20 @@
-"""
-Точка входа Flask-приложения.
-"""
-
+# ============================================================
+# ИМПОРТЫ И ИНИЦИАЛИЗАЦИЯ
+# ============================================================
 import time
 import uuid
 import hashlib
 import datetime
+import threading
 from functools import wraps
 from pathlib import Path
+import requests
 
 from flask import (
     Flask, render_template, request, jsonify,
     send_from_directory, redirect, url_for, session,
 )
+from flask_socketio import SocketIO
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from config import Config
@@ -20,16 +22,18 @@ from services import (
     ProcessManager, parse_m3u,
     MptsChannel, MptsProfile, build_mpts_command, build_udp_url,
     OverlayStorage, OverlayEngine, OverlayRule, OverlayText, TimeWindow,
-    MptsStorage, MptsGroup,
-    check_channels_parallel, read_progress_from_log,
-    validate_udp_stream, get_process_io,
-    AuthManager,
+    MptsStorage, MptsGroup, check_channels_parallel, read_progress_from_log,
+    validate_udp_stream, get_process_io, AuthManager
 )
-
 
 app = Flask(__name__)
 app.config.from_object(Config)
 app.permanent_session_lifetime = Config.PERMANENT_SESSION_LIFETIME
+
+# ------------ подсказка ----------------
+# async_mode="threading" позволяет SocketIO работать без eventlet/gevent.
+# Для локального Flask-сервера это проще и не требует monkey-patching.
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 process_manager = ProcessManager(Config.LOGS_DIR)
 auth = AuthManager(Config.USERS_FILE)
@@ -41,55 +45,147 @@ overlay_engine = OverlayEngine(process_manager, Config.HLS_DIR, overlay_cfg)
 mpts_storage = MptsStorage(Config.MPTS_CONFIG_PATH)
 mpts_cfg = mpts_storage.load()
 
-
-# --- Автомиграция: старые группы с proxy URL -> оригинальные URL ---
-def _migrate_old_groups():
-    working = set(overlay_engine.cfg.working_channel_urls)
-    changed = False
-    for g in mpts_cfg.groups:
-        new_urls = []
-        for url in g.channel_urls:
-            if "/proxy/hls/" in url:
-                parts = url.split("/proxy/hls/")
-                if len(parts) == 2:
-                    ch_id = parts[1].split("/")[0]
-                    found = None
-                    for w_url in working:
-                        if hashlib.md5(w_url.encode("utf-8")).hexdigest()[:8] == ch_id:
-                            found = w_url
-                            break
-                    new_urls.append(found if found else url)
-                else:
-                    new_urls.append(url)
-            else:
-                new_urls.append(url)
-        if new_urls != g.channel_urls:
-            g.channel_urls = new_urls
-            changed = True
-    if changed:
-        mpts_storage.save(mpts_cfg)
-        print("[migration] Старые группы с proxy URL преобразованы в оригиналы")
-
-
-_migrate_old_groups()
-
+# ------------ подсказка ----------------
+# APScheduler вызывает overlay_engine.sync() каждые 30 секунд:
+# подхватывает изменения расписания оверлеев, рестартит упавшие прокси.
+# Это независимо от пользовательских действий на /playlist и /overlay.
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=overlay_engine.sync, trigger="interval", seconds=30)
 scheduler.start()
 
 TEST_FFMPEG_COMMAND = [
     "ffmpeg", "-re", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10",
-    "-t", "3600", "-f", "null", "-",
+    "-t", "3600", "-f", "null", "-"
 ]
-KNOWN_PROCESSES = ("test_ffmpeg",)
+# ------------ подсказка ----------------
+# Кэш для расчёта сетевой скорости (Мбит/с). Хранит пары {pid: (ts, bytes)}.
+# Обновляется в _collect_ws_payload и api_mpts_group_monitor.
 _network_cache = {}
 
 
-# ============================================================
-# Авторизация
-# ============================================================
+def _get_default_font():
+    # ------------ подсказка ----------------
+    # Если пользователь не указал шрифт — ставим DejaVuSans. Он содержит
+    # базовый набор эмодзи и спецсимволов, которые иначе не отрисуются.
+    return "C:/Users/user/PycharmProjects/IPTV_OVERLAY_MPTS/static/fonts/DejaVuSans.ttf"
 
+
+def _sanitize_local_addr(addr: str) -> str:
+    # ------------ подсказка ----------------
+    # Loopback (127.x.x.x, localhost) НЕ умеет отправлять UDP-мультикаст:
+    # FFmpeg падает на setsockopt(IP_MULTICAST_IF), процесс умирает в первую
+    # секунду, MPTS не работает. Поэтому вычищаем loopback из local_addr
+    # ещё на уровне приложения — и при сохранении группы, и при старте.
+    # Пустая строка = FFmpeg сам выберет правильный интерфейс.
+    addr = (addr or "").strip()
+    if not addr:
+        return ""
+    if addr.lower() == "localhost" or addr.startswith("127."):
+        return ""
+    return addr
+
+
+def _auto_start_mpts_groups():
+    # ------------ подсказка ----------------
+    # Автозапуск групп MPTS при старте сервера, если у группы auto_start=True.
+    # Вызывается из точки входа (внизу файла).
+    print("[startup] Checking for auto_start MPTS groups...")
+    for g in mpts_cfg.groups:
+        if g.auto_start:
+            print(f"[startup] Auto-starting MPTS group: {g.name}")
+            try:
+                _start_mpts_group_internal(g.id)
+            except Exception as e:
+                print(f"[startup] Error starting {g.name}: {e}")
+
+
+def _collect_ws_payload() -> dict:
+    # ------------ подсказка ----------------
+    # Собираем всё, что нужно фронту для обновления UI каждые 2 секунды:
+    # - статусы ВСЕХ процессов (test, overlay, mpts, mosaic-preview)
+    # - прогресс кодирования (frame/fps/bitrate/speed) из лога
+    # - сетевую скорость (Мбит/с) через psutil
+    statuses = {p["name"]: process_manager.status(p["name"]) for p in process_manager.list_all()}
+    for item in overlay_engine.get_active_snapshot():
+        statuses[item["process_name"]] = process_manager.status(item["process_name"])
+    for g in mpts_cfg.groups:
+        statuses[f"mpts_{g.id}"] = process_manager.status(f"mpts_{g.id}")
+
+    mpts_statuses, monitors = {}, {}
+    for g in mpts_cfg.groups:
+        pname = f"mpts_{g.id}"
+        st = statuses.get(pname, {})
+        mpts_statuses[g.id] = st
+        if st.get("running"):
+            log_path = Config.LOGS_DIR / f"{pname}.log"
+            # ------------ подсказка ----------------
+            # read_progress_from_log парсит -progress pipe:1 из лога FFmpeg
+            # и достаёт frame/fps/bitrate/speed/out_time. Если файл только
+            # открылся — словарь может быть пустым, поэтому "—" в дефолтах.
+            progress = read_progress_from_log(log_path) or {}
+            pid = st.get("pid")
+            net_sent_mb, net_rate_mbps = None, None
+            if pid:
+                io = get_process_io(pid)
+                if io:
+                    now = time.time()
+                    prev = _network_cache.get(pid)
+                    net_sent_mb = round(io["write_bytes"] / (1024 * 1024), 2)
+                    # ------------ подсказка ----------------
+                    # Скорость = дельта байт × 8 / дельта времени / 1024².
+                    # Порог 0.1 сек — чтобы не делить на «почти ноль» при
+                    # слишком частых опросах.
+                    if prev:
+                        dt = now - prev["ts"]
+                        if dt > 0.1:
+                            net_rate_mbps = round(
+                                (io["write_bytes"] - prev["bytes"]) * 8 / dt / (1024 * 1024),
+                                2,
+                            )
+                    _network_cache[pid] = {"bytes": io["write_bytes"], "ts": now}
+            monitors[g.id] = {
+                "uptime_sec": st.get("uptime_sec", 0),
+                "frame": progress.get("frame", "—"),
+                "fps": progress.get("fps", "—"),
+                "bitrate": progress.get("bitrate", "—"),
+                "speed": progress.get("speed", "—"),
+                "out_time": progress.get("out_time", "—"),
+                "drop_frames": progress.get("drop_frames", "0"),
+                "net_sent_mb": net_sent_mb,
+                "net_rate_mbps": net_rate_mbps,
+            }
+    return {
+        "processes": statuses,
+        "mpts": mpts_statuses,
+        "monitors": monitors,
+        "timestamp": time.time(),
+    }
+
+
+def _ws_broadcast_loop() -> None:
+    # ------------ подсказка ----------------
+    # Фоновый поток, который каждые 2 сек рассылает всем подключённым
+    # клиентам событие "update". daemon=True — чтобы поток умирал вместе
+    # с Flask, а не висел после Ctrl+C.
+    while True:
+        try:
+            socketio.emit("update", _collect_ws_payload())
+        except Exception as exc:
+            print(f"[ws] broadcast error: {exc}")
+        time.sleep(2)
+
+
+threading.Thread(target=_ws_broadcast_loop, daemon=True).start()
+
+
+# ============================================================
+# АВТОРИЗАЦИЯ
+# ============================================================
 def login_required(f):
+    # ------------ подсказка ----------------
+    # Универсальный декоратор:
+    # - для /api/* возвращает 401 JSON (фронт сам покажет логин);
+    # - для обычных страниц редиректит на /login?next=<текущий путь>.
     @wraps(f)
     def wrapper(*args, **kwargs):
         if not session.get("user"):
@@ -97,17 +193,22 @@ def login_required(f):
                 return jsonify({"ok": False, "error": "Требуется авторизация"}), 401
             return redirect(url_for("login_page", next=request.path))
         return f(*args, **kwargs)
+
     return wrapper
 
 
 @app.before_request
 def enforce_password_change():
+    # ------------ подсказка ----------------
+    # Если у пользователя must_change_password=True — пускаем только на
+    # смену пароля и logout. Всё остальное (страницы → редирект, API → 403).
     if not session.get("user") or not session["user"].get("must_change_password"):
         return None
-    allowed_paths = {"/change-password", "/logout", "/login", "/favicon.ico"}
-    if request.path in allowed_paths or request.path.startswith("/static/"):
-        return None
-    if request.path in ("/api/auth/change-password", "/api/auth/me"):
+    allowed = {
+        "/change-password", "/logout", "/login", "/favicon.ico",
+        "/api/auth/change-password", "/api/auth/me",
+    }
+    if request.path in allowed or request.path.startswith("/static/"):
         return None
     if request.path.startswith("/api/"):
         return jsonify({"ok": False, "error": "Требуется смена пароля"}), 403
@@ -123,11 +224,9 @@ def login_page():
 
     username = (request.form.get("username") or "").strip()
     password = request.form.get("password") or ""
-    next_url = request.form.get("next") or "/"
-
     user = auth.verify(username, password)
     if not user:
-        return render_template("login.html", error="Неверный логин или пароль", next=next_url)
+        return render_template("login.html", error="Неверный логин или пароль", next="/")
 
     session.permanent = True
     session["user"] = {
@@ -137,9 +236,7 @@ def login_page():
     }
     if user.get("must_change_password"):
         return redirect(url_for("change_password_page"))
-    if not next_url.startswith("/"):
-        next_url = "/"
-    return redirect(next_url)
+    return redirect("/")
 
 
 @app.route("/logout")
@@ -158,20 +255,27 @@ def api_auth_me():
 @login_required
 def api_auth_change_password():
     data = request.get_json(silent=True) or {}
-    new_password = (data.get("new_password") or "").strip()
-    if len(new_password) < 6:
-        return jsonify({"ok": False, "error": "Пароль должен быть не короче 6 символов"}), 400
-    username = session["user"]["username"]
-    if auth.change_password(username, new_password):
+    new_pwd = (data.get("new_password") or "").strip()
+    if len(new_pwd) < 6:
+        return jsonify({"ok": False, "error": "Пароль < 6 символов"}), 400
+    if auth.change_password(session["user"]["username"], new_pwd):
+        # ------------ подсказка ----------------
+        # Снимаем флаг must_change_password прямо в сессии — иначе
+        # before_request продолжит редиректить на /change-password.
         session["user"]["must_change_password"] = False
         return jsonify({"ok": True})
-    return jsonify({"ok": False, "error": "Пользователь не найден"}), 404
+    return jsonify({"ok": False, "error": "Ошибка"}), 404
 
+
+@app.context_processor
+def inject_globals():
+    # ------------ подсказка ----------------
+    # Доступно во всех Jinja-шаблонах: {{ config.X }} и {{ current_year }}.
+    return {"config": Config, "current_year": datetime.datetime.now().year}
 
 # ============================================================
-# Страницы
+# СТРАНИЦЫ
 # ============================================================
-
 @app.route("/")
 @login_required
 def index():
@@ -184,6 +288,12 @@ def playlist_page():
     return render_template("playlist.html")
 
 
+@app.route("/overlay")
+@login_required
+def overlay_page():
+    return render_template("overlay.html")
+
+
 @app.route("/mpts")
 @login_required
 def mpts_page():
@@ -194,12 +304,6 @@ def mpts_page():
 @login_required
 def mosaic_page():
     return render_template("mosaic.html")
-
-
-@app.route("/overlay")
-@login_required
-def overlay_page():
-    return render_template("overlay.html")
 
 
 @app.route("/process")
@@ -226,22 +330,18 @@ def change_password_page():
     return render_template("change_password.html")
 
 
-@app.context_processor
-def inject_globals():
-    return {"config": Config, "current_year": datetime.datetime.now().year}
-
-
 # ============================================================
-# Плейлисты
+# API — ПЛЕЙЛИСТЫ
 # ============================================================
-
 @app.route("/api/playlists/parse", methods=["POST"])
 @login_required
 def api_parse_playlist():
+    # ------------ подсказка ----------------
+    # Парсит M3U-контент, присланный текстом (textarea на /playlist).
     data = request.get_json(silent=True) or {}
     content = data.get("content", "")
     if not content.strip():
-        return jsonify({"ok": False, "error": "Пустой плейлист"}), 400
+        return jsonify({"ok": False, "error": "Пусто"}), 400
     channels = parse_m3u(content)
     return jsonify({"ok": True, "count": len(channels), "channels": channels, "raw_content": content})
 
@@ -249,19 +349,21 @@ def api_parse_playlist():
 @app.route("/api/playlists/parse-file", methods=["POST"])
 @login_required
 def api_parse_playlist_from_file():
+    # ------------ подсказка ----------------
+    # Загрузка M3U файлом. Пробуем кодировки по очереди: utf-8-sig (с BOM),
+    # utf-8, cp1251 (Windows-1251, часто встречается в русских плейлистах).
     if "file" not in request.files:
-        return jsonify({"ok": False, "error": "Файл не приложен"}), 400
-    f = request.files["file"]
-    raw = f.read()
+        return jsonify({"ok": False, "error": "Нет файла"}), 400
+    raw = request.files["file"].read()
     content = None
     for enc in ("utf-8-sig", "utf-8", "cp1251"):
         try:
             content = raw.decode(enc)
             break
-        except UnicodeDecodeError:
+        except Exception:
             continue
-    if content is None:
-        return jsonify({"ok": False, "error": "Кодировка не распознана"}), 400
+    if not content:
+        return jsonify({"ok": False, "error": "Кодировка"}), 400
     channels = parse_m3u(content)
     return jsonify({"ok": True, "count": len(channels), "channels": channels, "raw_content": content})
 
@@ -269,34 +371,29 @@ def api_parse_playlist_from_file():
 @app.route("/api/playlists/parse-url", methods=["POST"])
 @login_required
 def api_parse_playlist_from_url():
-    data = request.get_json(silent=True) or {}
-    url = (data.get("url") or "").strip()
+    url = (request.get_json(silent=True) or {}).get("url", "").strip()
     if not url.startswith(("http://", "https://")):
-        return jsonify({"ok": False, "error": "Некорректный URL"}), 400
+        return jsonify({"ok": False, "error": "URL"}), 400
     try:
-        import requests
-        resp = requests.get(url, timeout=15, headers={"User-Agent": "IPTV-OVERLAY-MPTS/1.0"})
+        resp = requests.get(url, timeout=15)
         resp.raise_for_status()
-        content = resp.text
+        channels = parse_m3u(resp.text)
+        return jsonify({"ok": True, "count": len(channels), "channels": channels, "raw_content": resp.text})
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"Ошибка скачивания: {exc}"}), 400
-    channels = parse_m3u(content)
-    return jsonify({"ok": True, "count": len(channels), "channels": channels, "raw_content": content})
+        return jsonify({"ok": False, "error": str(exc)}), 400
 
-
-# ============================================================
-# Рабочий плейлист (используется /playlist, /mpts, /overlay)
-# ============================================================
 
 @app.route("/api/playlist/source", methods=["GET", "POST"])
 @login_required
 def api_playlist_source():
+    # ------------ подсказка ----------------
+    # Исходный (полный) M3U от провайдера. GET возвращает, POST сохраняет.
     if request.method == "GET":
         return jsonify({"ok": True, "content": overlay_engine.cfg.source_playlist})
     data = request.get_json(silent=True) or {}
     content = data.get("content", "")
     if not content.strip():
-        return jsonify({"ok": False, "error": "Пустой плейлист"}), 400
+        return jsonify({"ok": False, "error": "Пусто"}), 400
     overlay_engine.cfg.source_playlist = content
     overlay_storage.save(overlay_engine.cfg)
     return jsonify({"ok": True})
@@ -305,70 +402,138 @@ def api_playlist_source():
 @app.route("/api/playlist/working", methods=["GET", "POST"])
 @login_required
 def api_playlist_working():
+    # ------------ подсказка ----------------
+    # GET  — вернуть текущий рабочий плейлист.
+    # POST — сохранить и запустить overlay-прокси через sync().
     if request.method == "GET":
         return jsonify({"ok": True, "urls": overlay_engine.cfg.working_channel_urls})
+
     data = request.get_json(silent=True) or {}
     urls = data.get("urls", [])
+
+    # ------------ подсказка ----------------
+    # Валидация: только список непустых строк. Иначе save() или sync()
+    # упадут на None/dict/мусоре (классическая ошибка от JS).
+    if not isinstance(urls, list):
+        return jsonify({"ok": False, "error": "urls должен быть списком"}), 400
+    urls = [u for u in urls if isinstance(u, str) and u.strip()]
+
     overlay_engine.cfg.working_channel_urls = urls
-    overlay_storage.save(overlay_engine.cfg)
-    overlay_engine.sync()
-    return jsonify({"ok": True})
+
+    # ------------ подсказка ----------------
+    # save() и sync() — в отдельных try/except. Так фронт видит "stage",
+    # на котором упало, а не общий HTML-500.
+    try:
+        overlay_storage.save(overlay_engine.cfg)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "ok": False,
+            "stage": "save",
+            "error": f"{type(e).__name__}: {e}",
+        }), 500
+
+    try:
+        overlay_engine.sync()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "ok": False,
+            "stage": "sync",
+            "error": f"{type(e).__name__}: {e}",
+        }), 500
+
+    return jsonify({"ok": True, "count": len(urls)})
 
 
 # ============================================================
-# Overlay — только правила
+# API — OVERLAY
 # ============================================================
+def _find_emoji(text: str) -> list[str]:
+    # ------------ подсказка ----------------
+    # Ищем эмодзи, которые не отрисуются в drawtext даже с DejaVuSans.
+    # safe_cp — whitelist «безопасных» символов (звёзды, сердца, снежинки,
+    # галочки и т.п.), которые DejaVuSans умеет рисовать.
+    if not text:
+        return []
+    found, seen = [], set()
+    for ch in text:
+        cp = ord(ch)
+        is_emoji = (
+            0x1F300 <= cp <= 0x1F9FF
+            or 0x1F600 <= cp <= 0x1F64F
+            or 0x1F680 <= cp <= 0x1F6FF
+            or 0x2600 <= cp <= 0x27BF
+        )
+        safe_cp = {
+            0x2605, 0x2606, 0x2665, 0x2661, 0x266A, 0x266B,
+            0x2713, 0x2714, 0x2717, 0x2718, 0x263A, 0x263B,
+            0x2600, 0x263C, 0x2601, 0x2602, 0x2603, 0x2744,
+            0x2745, 0x2746, 0x2668, 0x2702, 0x2708, 0x26A1,
+        }
+        if is_emoji and cp not in safe_cp and ch not in seen:
+            seen.add(ch)
+            found.append(ch)
+    return found
+
+
+@app.route("/api/overlay/available-channels")
+@login_required
+def api_overlay_available_channels():
+    # ------------ подсказка ----------------
+    # Только те каналы, что в рабочем плейлисте — по ним можно создать правило.
+    working = set(overlay_engine.cfg.working_channel_urls)
+    parsed = parse_m3u(overlay_engine.cfg.source_playlist) if overlay_engine.cfg.source_playlist else []
+    return jsonify({"ok": True, "channels": [ch for ch in parsed if ch["url"] in working]})
+
 
 @app.route("/api/overlay/rules", methods=["GET", "POST"])
 @login_required
 def api_overlay_rules():
+    # ------------ подсказка ----------------
+    # GET  — список всех правил.
+    # POST — создать или обновить правило. Требует force=True, если:
+    #   * в тексте есть «опасные» эмодзи;
+    #   * есть каналы, которых нет ни в одной MPTS-группе.
     if request.method == "GET":
-        rules_data = [overlay_storage.rule_to_dict(r) for r in overlay_engine.cfg.rules]
-        return jsonify({"ok": True, "rules": rules_data})
+        return jsonify({"ok": True, "rules": [overlay_storage.rule_to_dict(r) for r in overlay_engine.cfg.rules]})
 
     data = request.get_json(silent=True) or {}
     rule_id = data.get("id") or f"rule-{uuid.uuid4().hex[:6]}"
     req_urls = data.get("channel_urls", [])
     rule_text_value = data.get("text", "")
 
-    # --- Собираем ВСЕ предупреждения в один список ---
     warnings = []
-
-    # 1. Эмодзи в тексте
     emoji_chars = _find_emoji(rule_text_value)
     if emoji_chars:
-        warnings.append(
-            f"⚠ В тексте обнаружены эмодзи: {' '.join(emoji_chars[:5])}\n"
-            f"   Шрифт Arial их не поддерживает — будут квадратики □.\n"
-            f"   Замените их на символы из палитры (★ Символы)."
-        )
+        warnings.append(f"⚠ В тексте есть эмодзи: {' '.join(emoji_chars[:5])}. Замените их.")
+    mpts_channels = {u for g in mpts_cfg.groups for u in g.channel_urls}
+    missing = [u for u in req_urls if u not in mpts_channels]
+    if missing:
+        warnings.append(f"⚠ {len(missing)} канал(ов) нет в MPTS.")
 
-    # 2. Каналы не в MPTS
-    mpts_channels = set()
-    for g in mpts_cfg.groups:
-        mpts_channels.update(g.channel_urls)
-    missing_from_mpts = [u for u in req_urls if u not in mpts_channels]
-    if missing_from_mpts:
-        warnings.append(
-            f"⚠ {len(missing_from_mpts)} канал(ов) не входят в сетку вещания (MPTS).\n"
-            f"   Строка на них не попадёт в эфир."
-        )
-
-    # Если есть предупреждения и пользователь не подтвердил — возвращаем
     if warnings and not data.get("force"):
         return jsonify({
             "ok": False,
             "require_confirm": True,
-            "warning": "Внимание!\n\n" + "\n\n".join(warnings) + "\n\nВсё равно сохранить?"
+            "warning": "Внимание!\n\n" + "\n\n".join(warnings) + "\n\nСохранить?",
         }), 400
 
-    # --- Сохраняем правило ---
+    # ------------ подсказка ----------------
+    # Шрифт: если пусто или arial — принудительно DejaVuSans.
+    # Arial на Windows не находит кириллицу и ломает drawtext.
+    font_path = data.get("font_path", "").strip()
+    if not font_path or "arial" in font_path.lower():
+        font_path = _get_default_font()
+
     new_rule = OverlayRule(
         id=rule_id,
         name=data.get("name", "Без названия"),
         text=OverlayText(
             text=rule_text_value or "Текст",
-            font_path=data.get("font_path", "").strip() or str(Config.DEFAULT_OVERLAY_FONT),
+            font_path=font_path,
             font_size=int(data.get("font_size", 36)),
             font_color=data.get("font_color", "white"),
             font_alpha=float(data.get("font_alpha", 1.0)),
@@ -392,6 +557,8 @@ def api_overlay_rules():
         is_yearly=bool(data.get("is_yearly", False)),
     )
 
+    # ------------ подсказка ----------------
+    # upsert: ищем по id. Если нашли — заменяем, иначе добавляем.
     existing_idx = next((i for i, r in enumerate(overlay_engine.cfg.rules) if r.id == rule_id), None)
     if existing_idx is not None:
         overlay_engine.cfg.rules[existing_idx] = new_rule
@@ -411,113 +578,23 @@ def api_overlay_rule_delete(rule_id):
     overlay_engine.sync()
     return jsonify({"ok": True})
 
-
-@app.route("/api/overlay/available-channels")
-@login_required
-def api_overlay_available_channels():
-    """Каналы из рабочего плейлиста, доступные для наложения правил."""
-    working = set(overlay_engine.cfg.working_channel_urls)
-    parsed = parse_m3u(overlay_engine.cfg.source_playlist) if overlay_engine.cfg.source_playlist else []
-    channels = [ch for ch in parsed if ch["url"] in working]
-    return jsonify({"ok": True, "channels": channels})
-
-
 # ============================================================
-# MPTS
+# API — MPTS
 # ============================================================
-
-@app.route("/api/network/interfaces")
-@login_required
-def api_network_interfaces():
-    from services.network_interfaces import get_interfaces
-    return jsonify({"ok": True, "interfaces": get_interfaces()})
-
-
-@app.route("/api/mpts/config", methods=["GET"])
-@login_required
-def api_mpts_config():
-    """Каналы — из рабочего плейлиста (тот же, что в /playlist)."""
-    working = set(overlay_engine.cfg.working_channel_urls)
-    parsed = parse_m3u(overlay_engine.cfg.source_playlist) if overlay_engine.cfg.source_playlist else []
-    channels = [ch for ch in parsed if ch["url"] in working]
-
-    return jsonify({
-        "ok": True,
-        "channels": channels,
-        "groups": [
-            {"id": g.id, "name": g.name, "host": g.host, "port": g.port,
-             "local_addr": g.local_addr, "channel_urls": g.channel_urls}
-            for g in mpts_cfg.groups
-        ]
-    })
-
-
-@app.route("/api/mpts/check-channels", methods=["POST"])
-@login_required
-def api_mpts_check_channels():
-    data = request.get_json(silent=True) or {}
-    urls = data.get("urls", [])
-    if not isinstance(urls, list) or not urls:
-        return jsonify({"ok": False, "error": "urls должен быть непустым списком"}), 400
-    results = check_channels_parallel(urls, timeout=12)
-    return jsonify({"ok": True, "results": results})
-
-
-@app.route("/api/mpts/groups", methods=["POST"])
-@login_required
-def api_mpts_create_group():
-    data = request.get_json(silent=True) or {}
-    group_id = data.get("id") or f"grp-{uuid.uuid4().hex[:6]}"
-    new_urls = data.get("channel_urls", [])
-
-    existing = next((g for g in mpts_cfg.groups if g.id == group_id), None)
-
-    if existing and not data.get("force"):
-        removed_urls = [u for u in existing.channel_urls if u not in new_urls]
-        for url in removed_urls:
-            for rule in overlay_engine.cfg.rules:
-                if url in rule.channel_urls:
-                    return jsonify({
-                        "ok": False, "require_confirm": True,
-                        "warning": f"Внимание! Вы удаляете канал, на котором активно правило '{rule.name}'. Строка останется, но канал выйдет из эфира MPTS. Продолжить?"
-                    }), 400
-
-    if existing:
-        existing.name = data.get("name", existing.name)
-        existing.host = data.get("host", existing.host)
-        existing.port = int(data.get("port", existing.port))
-        existing.local_addr = data.get("local_addr", existing.local_addr)
-        existing.channel_urls = new_urls
-    else:
-        mpts_cfg.groups.append(MptsGroup(
-            id=group_id, name=data.get("name", "Group"),
-            host=data.get("host", "239.0.0.1"),
-            port=int(data.get("port", 5000)),
-            local_addr=data.get("local_addr", ""),
-            channel_urls=new_urls,
-        ))
-    mpts_storage.save(mpts_cfg)
-    return jsonify({"ok": True, "id": group_id})
-
-
-@app.route("/api/mpts/groups/<group_id>", methods=["DELETE"])
-@login_required
-def api_mpts_delete_group(group_id):
-    process_manager.stop(f"mpts_{group_id}")
-    mpts_cfg.groups = [g for g in mpts_cfg.groups if g.id != group_id]
-    mpts_storage.save(mpts_cfg)
-    return jsonify({"ok": True})
-
-
-@app.route("/api/mpts/groups/<group_id>/start", methods=["POST"])
-@login_required
-def api_mpts_group_start(group_id):
+def _start_mpts_group_internal(group_id: str) -> dict:
+    # ------------ подсказка ----------------
+    # Внутренняя логика запуска MPTS. Используется из API и из автозапуска.
+    # Ключевые фиксы против прошлых падений:
+    #   1) URL = http://127.0.0.1:5000/... (не file://) — переживает
+    #      микросекунду, когда overlay перезаписывает index.m3u8.
+    #   2) Ждём HLS до 120 сек (OVERLAY-прокси стартует 60-90 сек).
+    #   3) local_addr прогоняется через _sanitize_local_addr — убирает
+    #      loopback, который валит мультикаст.
+    #   4) После start() ждём 5 сек и проверяем, жив ли FFmpeg. Если упал —
+    #      возвращаем 400 с последней строкой лога, а не молчаливый 200.
     group = next((g for g in mpts_cfg.groups if g.id == group_id), None)
     if not group:
-        return jsonify({"ok": False, "error": "Группа не найдена"}), 404
-
-    data = request.get_json(silent=True) or {}
-    force = bool(data.get("force", False))
+        return {"ok": False, "error": "Группа не найдена"}
 
     parsed = parse_m3u(overlay_engine.cfg.source_playlist) if overlay_engine.cfg.source_playlist else []
     working = set(overlay_engine.cfg.working_channel_urls)
@@ -530,46 +607,195 @@ def api_mpts_group_start(group_id):
         if not ch:
             continue
         ch_id = hashlib.md5(url.encode("utf-8")).hexdigest()[:8]
-        proxy_url = f"{overlay_engine.cfg.public_base_url}/proxy/hls/{ch_id}/index.m3u8"
-        selected.append(MptsChannel(name=ch["name"], url=proxy_url))
+        local_path = Config.HLS_DIR / f"proxy_{ch_id}" / "index.m3u8"
+        # ------------ подсказка ----------------
+        # Для MPTS используем HTTP, а не file:// — file:// не умеет
+        # переподключаться, если файл исчез на микросекунду при перезаписи.
+        http_url = f"http://127.0.0.1:5000/proxy/hls/{ch_id}/index.m3u8"
+        selected.append({
+            "name": ch["name"],
+            "path": local_path,
+            "url": http_url,
+        })
 
     if not selected:
-        return jsonify({"ok": False, "error": "Нет валидных каналов (все не в рабочем плейлисте)"}), 400
+        return {"ok": False, "error": "Нет валидных каналов"}
 
-    # Диагностика: проверяем, у каких каналов есть готовые файлы и живы ли процессы
-    not_ready_names = []
-    dead_names = []
-    for ch in selected:
-        if "/proxy/hls/" not in ch.url:
-            continue
-        ch_id = ch.url.split("/proxy/hls/")[1].split("/")[0]
-        d = Config.HLS_DIR / f"proxy_{ch_id}"
-        has_m3u8 = (d / "index.m3u8").exists()
-        has_ts = d.exists() and any(d.glob("*.ts"))
-        if has_m3u8 and has_ts:
-            continue  # готов
-        not_ready_names.append(ch.name)
-        # Проверим, жив ли процесс
-        st = process_manager.status(f"proxy_{ch_id}")
-        if not st.get("running"):
-            dead_names.append(ch.name)
+    # ------------ подсказка ----------------
+    # Ждём, пока все index.m3u8 появятся и станут > 100 байт.
+    # 120 сек — потому что OVERLAY-прокси тратит 30 сек на analyzeduration,
+    # плюс буферизация и накопление первых сегментов.
+    deadline = time.time() + 120
+    missing = []
+    while time.time() < deadline:
+        missing = [
+            item["name"] for item in selected
+            if not item["path"].exists() or item["path"].stat().st_size < 100
+        ]
+        if not missing:
+            break
+        time.sleep(1.0)
 
-    if not_ready_names and not force:
-        msg = f"Внимание: {len(not_ready_names)} прокси-поток(ов) ещё не готовы:\n\n"
-        msg += "  • " + "\n  • ".join(not_ready_names) + "\n\n"
-        if dead_names:
-            msg += f"⚠ Из них {len(dead_names)} процессов УПАЛИ. Проверьте логи в data/logs/proxy_*.log\n\n"
-        else:
-            msg += "⏳ Процессы работают, но HLS ещё формируется (обычно 10–30 секунд для HLS-источников).\n\n"
-        msg += "Можно подождать и попробовать снова, ИЛИ запустить MPTS сейчас — он будет повторять подключение до 30 секунд.\n\nПродолжить?"
-        return jsonify({"ok": False, "require_confirm": True, "warning": msg}), 200
+    if missing:
+        return {
+            "ok": False,
+            "error": (
+                f"HLS не готов: {', '.join(missing[:3])}"
+                f"{'...' if len(missing) > 3 else ''}. Подождите 30-60 секунд."
+            ),
+        }
 
+    channels = [MptsChannel(name=i["name"], url=i["url"]) for i in selected]
     profile = MptsProfile(
-        channels=selected,
-        output_url=build_udp_url(group.host, group.port, local_addr=group.local_addr)
+        channels=channels,
+        output_url=build_udp_url(
+            group.host, group.port,
+            # ------------ подсказка ----------------
+            # Санитайзер: даже если в конфиге остался 127.0.0.1 — на выход
+            # пойдёт пустая строка (FFmpeg сам выберет интерфейс).
+            local_addr=_sanitize_local_addr(group.local_addr),
+        ),
     )
     cmd = build_mpts_command(profile)
-    res = process_manager.start(f"mpts_{group_id}", cmd)
+
+    proc_name = f"mpts_{group_id}"
+    if process_manager.status(proc_name).get("running"):
+        return {"ok": False, "error": "Группа уже запущена"}
+
+    print(f"[mpts] === START {group.name} ({len(channels)} ch) ===")
+    print(f"[mpts] CMD: {' '.join(cmd)}")
+
+    res = process_manager.start(proc_name, cmd)
+    if not res.get("ok"):
+        return res
+
+    # ------------ подсказка ----------------
+    # Live-check: ждём 5 секунд. Если FFmpeg жив — считаем, что стартовал
+    # успешно. Если упал — достаём последнюю строку лога, чтобы фронт мог
+    # показать её в alert вместо «молчаливого 200 и моргающей панели».
+    time.sleep(5.0)
+    if process_manager.status(proc_name).get("running"):
+        return res
+
+    log_path = Config.LOGS_DIR / f"{proc_name}.log"
+    last_line = ""
+    if log_path.exists():
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+            last_line = lines[-1] if lines else ""
+        except Exception:
+            pass
+    return {
+        "ok": False,
+        "error": f"FFmpeg упал через 5 сек: {last_line or 'см. logs'}",
+    }
+
+
+@app.route("/api/mpts/config", methods=["GET"])
+@login_required
+def api_mpts_config():
+    # ------------ подсказка ----------------
+    # Фронту /mpts нужны:
+    # - channels: каналы из рабочего плейлиста (для выбора в группу);
+    # - groups: все созданные группы с их URL/host/port/local_addr.
+    working = set(overlay_engine.cfg.working_channel_urls)
+    parsed = parse_m3u(overlay_engine.cfg.source_playlist) if overlay_engine.cfg.source_playlist else []
+    channels = [ch for ch in parsed if ch["url"] in working]
+    return jsonify({
+        "ok": True,
+        "channels": channels,
+        "groups": [
+            {
+                "id": g.id, "name": g.name, "host": g.host, "port": g.port,
+                "local_addr": g.local_addr, "channel_urls": g.channel_urls,
+                "auto_start": g.auto_start,
+            }
+            for g in mpts_cfg.groups
+        ],
+    })
+
+
+@app.route("/api/mpts/check-channels", methods=["POST"])
+@login_required
+def api_mpts_check_channels():
+    # ------------ подсказка ----------------
+    # Параллельная проверка доступности URL (запускается из UI перед созданием
+    # группы). Возвращает список {url, ok, error?, latency_ms?}.
+    urls = (request.get_json(silent=True) or {}).get("urls", [])
+    if not isinstance(urls, list) or not urls:
+        return jsonify({"ok": False, "error": "urls"}), 400
+    return jsonify({"ok": True, "results": check_channels_parallel(urls, timeout=12)})
+
+
+@app.route("/api/mpts/groups", methods=["POST"])
+@login_required
+def api_mpts_create_group():
+    # ------------ подсказка ----------------
+    # Создание/обновление группы. Если удаляем канал, у которого есть
+    # активное правило overlay — просим force=True (чтобы пользователь
+    # случайно не сломал эфир).
+    data = request.get_json(silent=True) or {}
+    group_id = data.get("id") or f"grp-{uuid.uuid4().hex[:6]}"
+    new_urls = data.get("channel_urls", [])
+    existing = next((g for g in mpts_cfg.groups if g.id == group_id), None)
+
+    if existing and not data.get("force"):
+        removed = [u for u in existing.channel_urls if u not in new_urls]
+        for url in removed:
+            for rule in overlay_engine.cfg.rules:
+                if url in rule.channel_urls:
+                    return jsonify({
+                        "ok": False,
+                        "require_confirm": True,
+                        "warning": f"Вы удаляете канал с активной строкой '{rule.name}'. Продолжить?",
+                    }), 400
+
+    if existing:
+        existing.name = data.get("name", existing.name)
+        existing.host = data.get("host", existing.host)
+        existing.port = int(data.get("port", existing.port))
+        # ------------ подсказка ----------------
+        # Санитайзер local_addr: 127.0.0.1 / localhost → "".
+        # Иначе FFmpeg упадёт на setsockopt(IP_MULTICAST_IF) при старте.
+        existing.local_addr = _sanitize_local_addr(data.get("local_addr", existing.local_addr))
+        existing.channel_urls = new_urls
+        existing.auto_start = bool(data.get("auto_start", existing.auto_start))
+    else:
+        mpts_cfg.groups.append(MptsGroup(
+            id=group_id,
+            name=data.get("name", "Group"),
+            host=data.get("host", "239.0.0.1"),
+            port=int(data.get("port", 5000)),
+            # ------------ подсказка ----------------
+            # Санитайзер и для новой группы — на случай, если фронт
+            # пришлёт 127.0.0.1 из автозаполнения.
+            local_addr=_sanitize_local_addr(data.get("local_addr", "")),
+            channel_urls=new_urls,
+            auto_start=bool(data.get("auto_start", False)),
+        ))
+    mpts_storage.save(mpts_cfg)
+    return jsonify({"ok": True, "id": group_id})
+
+
+@app.route("/api/mpts/groups/<group_id>", methods=["DELETE"])
+@login_required
+def api_mpts_delete_group(group_id):
+    # ------------ подсказка ----------------
+    # Сначала останавливаем процесс, потом удаляем группу из конфига.
+    # Иначе FFmpeg останется сиротой и продолжит вещать в UDP.
+    process_manager.stop(f"mpts_{group_id}")
+    mpts_cfg.groups = [g for g in mpts_cfg.groups if g.id != group_id]
+    mpts_storage.save(mpts_cfg)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/mpts/groups/<group_id>/start", methods=["POST"])
+@login_required
+def api_mpts_group_start(group_id):
+    # ------------ подсказка ----------------
+    # Тонкая обёртка: вся логика в _start_mpts_group_internal.
+    # Возвращаем 200 только при ok:true, иначе 400 с телом ошибки.
+    res = _start_mpts_group_internal(group_id)
     return jsonify(res), (200 if res.get("ok") else 400)
 
 
@@ -583,95 +809,156 @@ def api_mpts_group_stop(group_id):
 @app.route("/api/mpts/groups/<group_id>/monitor")
 @login_required
 def api_mpts_group_monitor(group_id):
+    # ------------ подсказка ----------------
+    # Точечный опрос состояния одной группы (для карточки на /mpts).
+    # Дублирует часть _collect_ws_payload, но для конкретной группы.
     proc_name = f"mpts_{group_id}"
     status = process_manager.status(proc_name)
     if not status.get("running"):
         return jsonify({"ok": True, "running": False, "uptime_sec": 0})
 
-    log_path = Config.LOGS_DIR / f"{proc_name}.log"
-    progress = read_progress_from_log(log_path) or {}
+    progress = read_progress_from_log(Config.LOGS_DIR / f"{proc_name}.log") or {}
     pid = status.get("pid")
-    net_sent_mb, net_rate_mbps = None, None
+    net_sent, net_rate = None, None
     if pid:
         io = get_process_io(pid)
         if io:
             now = time.time()
             prev = _network_cache.get(pid)
-            net_sent_mb = round(io["write_bytes"] / (1024 * 1024), 2)
+            net_sent = round(io["write_bytes"] / (1024 * 1024), 2)
             if prev:
                 dt = now - prev["ts"]
                 if dt > 0.1:
-                    net_rate_mbps = round((io["write_bytes"] - prev["bytes"]) * 8 / dt / (1024 * 1024), 2)
+                    net_rate = round(
+                        (io["write_bytes"] - prev["bytes"]) * 8 / dt / (1024 * 1024), 2
+                    )
             _network_cache[pid] = {"bytes": io["write_bytes"], "ts": now}
-
     return jsonify({
-        "ok": True, "running": True, "uptime_sec": status.get("uptime_sec", 0),
-        "frame": progress.get("frame", "—"), "fps": progress.get("fps", "—"),
-        "bitrate": progress.get("bitrate", "—"), "speed": progress.get("speed", "—"),
-        "out_time": progress.get("out_time", "—"), "drop_frames": progress.get("drop_frames", "0"),
-        "net_sent_mb": net_sent_mb, "net_rate_mbps": net_rate_mbps,
+        "ok": True,
+        "running": True,
+        "uptime_sec": status.get("uptime_sec", 0),
+        "frame": progress.get("frame", "—"),
+        "fps": progress.get("fps", "—"),
+        "bitrate": progress.get("bitrate", "—"),
+        "speed": progress.get("speed", "—"),
+        "out_time": progress.get("out_time", "—"),
+        "drop_frames": progress.get("drop_frames", "0"),
+        "net_sent_mb": net_sent,
+        "net_rate_mbps": net_rate,
     })
 
 
 @app.route("/api/mpts/groups/<group_id>/validate")
 @login_required
 def api_mpts_group_validate(group_id):
+    # ------------ подсказка ----------------
+    # Проверка, что UDP-поток реально идёт (ffprobe слушает multicast).
+    # На Windows требует либо admin, либо правильный интерфейс.
     group = next((g for g in mpts_cfg.groups if g.id == group_id), None)
     if not group:
-        return jsonify({"ok": False, "error": "Группа не найдена"}), 404
+        return jsonify({"ok": False, "error": "Нет группы"}), 404
     if not process_manager.status(f"mpts_{group_id}").get("running"):
-        return jsonify({"ok": False, "error": "Поток не запущен"}), 400
-    return jsonify({"ok": True, "result": validate_udp_stream(group.host, group.port, timeout_sec=6)})
+        return jsonify({"ok": False, "error": "Не запущен"}), 400
+    return jsonify({
+        "ok": True,
+        "result": validate_udp_stream(group.host, group.port, timeout_sec=6),
+    })
 
 
 @app.route("/api/mpts/status")
 @login_required
 def api_mpts_status():
-    return jsonify({"ok": True, "statuses": {g.id: process_manager.status(f"mpts_{g.id}") for g in mpts_cfg.groups}})
+    # ------------ подсказка ----------------
+    # Быстрый опрос статусов всех MPTS-групп (то, что дёргает /mpts каждые 2 сек).
+    return jsonify({
+        "ok": True,
+        "statuses": {g.id: process_manager.status(f"mpts_{g.id}") for g in mpts_cfg.groups},
+    })
 
+
+@app.route("/api/network/interfaces")
+@login_required
+def api_network_interfaces():
+    # ------------ подсказка ----------------
+    # Список сетевых интерфейсов для выпадающего меню "Локальный адрес"
+    # при создании MPTS-группы. Помогает пользователю выбрать правильный
+    # IP, а не вписать 127.0.0.1 руками.
+    from services.network_interfaces import get_interfaces
+    return jsonify({"ok": True, "interfaces": get_interfaces()})
 
 # ============================================================
-# Мозаика
+# API — МОЗАИКА
 # ============================================================
-
 @app.route("/api/mosaic/sources")
 @login_required
 def api_mosaic_sources():
+    # ------------ подсказка ----------------
+    # Отдаёт фронту всё, что можно показать в мозаике:
+    # - overlay-каналы (готовые прокси с наложением);
+    # - сырые каналы (если запущен preview);
+    # - MPTS-группы (если запущен их preview).
     sources = []
     working = set(overlay_engine.cfg.working_channel_urls)
     parsed = parse_m3u(overlay_engine.cfg.source_playlist) if overlay_engine.cfg.source_playlist else []
     channels_by_url = {c["url"]: c.get("name", c["url"]) for c in parsed}
 
+    # 1. Overlay-каналы (уже с оверлеем)
     active_overlay_urls = set()
-    for item in overlay_engine.get_active_snapshot():
-        active_overlay_urls.add(item["url"])
+    for url, info in overlay_engine.active_channels.items():
+        active_overlay_urls.add(url)
         sources.append({
-            "id": f"overlay_{item['ch_id']}", "type": "overlay_channel",
-            "name": channels_by_url.get(item["url"], item["url"]),
-            "url": f"/proxy/hls/{item['ch_id']}/index.m3u8",
+            "id": f"overlay_{info['ch_id']}",
+            "type": "overlay_channel",
+            "name": channels_by_url.get(url, url),
+            "url": f"/proxy/hls/{info['ch_id']}/index.m3u8",
         })
 
+    # 2. Сырые каналы (только если запущен preview)
     for ch in parsed:
         if ch["url"] in active_overlay_urls:
             continue
         ch_id = hashlib.md5(ch["url"].encode("utf-8")).hexdigest()[:8]
-        prev = process_manager.status(f"chprev_{ch_id}")
+        proc_status = process_manager.status(f"chprev_{ch_id}")
+        playlist_file = Config.HLS_DIR / f"chprev_{ch_id}" / "index.m3u8"
+        # ------------ подсказка ----------------
+        # ready = процесс жив + плейлист свежий (< 10 сек) + размер > 100 байт.
+        # Иначе плеер будет ломиться на 404/пустой m3u8.
+        ready = False
+        if proc_status.get("running") and playlist_file.exists():
+            try:
+                stat = playlist_file.stat()
+                ready = (time.time() - stat.st_mtime) < 10 and stat.st_size > 100
+            except OSError:
+                pass
         sources.append({
-            "id": f"raw_{ch_id}", "type": "raw_channel", "name": ch["name"], "ch_id": ch_id,
-            "url": f"/mosaic/chprev/{ch_id}/index.m3u8" if prev.get("running") else None,
-            "preview_running": prev.get("running", False),
+            "id": f"raw_{ch_id}",
+            "type": "raw_channel",
+            "name": ch["name"],
+            "ch_id": ch_id,
+            "url": f"/mosaic/chprev/{ch_id}/index.m3u8" if ready else None,
+            "preview_running": ready,
             "in_working": ch["url"] in working,
         })
 
+    # 3. MPTS-группы
     for g in mpts_cfg.groups:
-        mpts_st = process_manager.status(f"mpts_{g.id}")
-        prev = process_manager.status(f"mpts_preview_{g.id}")
+        mpts_status = process_manager.status(f"mpts_{g.id}")
+        preview_status = process_manager.status(f"mpts_preview_{g.id}")
+        playlist_file = Config.HLS_DIR / f"preview_{g.id}" / "index.m3u8"
+        preview_ready = False
+        if preview_status.get("running") and playlist_file.exists():
+            try:
+                stat = playlist_file.stat()
+                preview_ready = (time.time() - stat.st_mtime) < 10 and stat.st_size > 100
+            except OSError:
+                pass
         sources.append({
-            "id": f"mpts_{g.id}", "type": "mpts_group",
+            "id": f"mpts_{g.id}",
+            "type": "mpts_group",
             "name": f"MPTS: {g.name} ({g.host}:{g.port})",
-            "url": f"/mosaic/hls/{g.id}/index.m3u8" if prev.get("running") else None,
-            "mpts_running": mpts_st.get("running", False),
-            "preview_running": prev.get("running", False),
+            "url": f"/mosaic/hls/{g.id}/index.m3u8" if preview_ready else None,
+            "mpts_running": mpts_status.get("running", False),
+            "preview_running": preview_ready,
         })
 
     return jsonify({"ok": True, "sources": sources})
@@ -680,29 +967,50 @@ def api_mosaic_sources():
 @app.route("/api/mosaic/preview/<group_id>/start", methods=["POST"])
 @login_required
 def api_mosaic_preview_start(group_id):
+    # ------------ подсказка ----------------
+    # Запускает "просмотр" MPTS-группы в мозаике: FFmpeg слушает UDP-поток
+    # и транскодирует (copy) в HLS-файлы preview_<group_id>.
+    # Требует, чтобы MPTS-группа уже была запущена — иначе слушать нечего.
     group = next((g for g in mpts_cfg.groups if g.id == group_id), None)
     if not group:
-        return jsonify({"ok": False, "error": "Группа не найдена"}), 404
+        return jsonify({"ok": False, "error": "Нет группы"}), 404
     if not process_manager.status(f"mpts_{group_id}").get("running"):
-        return jsonify({"ok": False, "error": "Сначала запустите MPTS"}), 400
+        return jsonify({"ok": False, "error": "Запустите MPTS"}), 400
 
     preview_dir = Config.HLS_DIR / f"preview_{group_id}"
     preview_dir.mkdir(parents=True, exist_ok=True)
-    for f in preview_dir.glob("*.ts"):
-        try: f.unlink(missing_ok=True)
-        except: pass
-    if (preview_dir / "index.m3u8").exists():
-        try: (preview_dir / "index.m3u8").unlink()
-        except: pass
 
-    udp_url = f"udp://@{group.host}:{group.port}" if group.host.startswith(("22", "23")) else f"udp://{group.host}:{group.port}"
-    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-i", udp_url,
-           "-c", "copy", "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-           "-hls_flags", "delete_segments+append_list",
-           "-hls_segment_filename", str(preview_dir / "seg_%03d.ts"),
-           str(preview_dir / "index.m3u8")]
-    res = process_manager.start(f"mpts_preview_{group_id}", cmd)
-    return jsonify(res), (200 if res.get("ok") else 400)
+    # ------------ подсказка ----------------
+    # Чистим старые сегменты, чтобы клиент не подхватил устаревший m3u8
+    # с битыми ссылками на уже удалённые ts.
+    for f in preview_dir.glob("*.ts"):
+        try:
+            f.unlink(missing_ok=True)
+        except Exception:
+            pass
+    if (preview_dir / "index.m3u8").exists():
+        try:
+            (preview_dir / "index.m3u8").unlink()
+        except Exception:
+            pass
+
+    # ------------ подсказка ----------------
+    # udp://@<host>:<port> — "@" перед адресом = "слушать multicast".
+    # Без "@" — пытаться отправить, что для нас неверно.
+    udp_url = (
+        f"udp://@{group.host}:{group.port}"
+        if group.host.startswith(("22", "23"))
+        else f"udp://{group.host}:{group.port}"
+    )
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error",
+        "-i", udp_url, "-c", "copy",
+        "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+        "-hls_flags", "delete_segments+append_list",
+        "-hls_segment_filename", str(preview_dir / "seg_%03d.ts"),
+        str(preview_dir / "index.m3u8"),
+    ]
+    return jsonify(process_manager.start(f"mpts_preview_{group_id}", cmd))
 
 
 @app.route("/api/mosaic/preview/<group_id>/stop", methods=["POST"])
@@ -714,27 +1022,36 @@ def api_mosaic_preview_stop(group_id):
 @app.route("/api/mosaic/preview-channel/<ch_id>/start", methods=["POST"])
 @login_required
 def api_mosaic_channel_preview_start(ch_id):
+    # ------------ подсказка ----------------
+    # Просмотр сырого канала (без оверлея). Ищем канал по ch_id в исходном
+    # плейлисте — это позволяет смотреть каналы, которых нет в рабочем списке.
     parsed = parse_m3u(overlay_engine.cfg.source_playlist) if overlay_engine.cfg.source_playlist else []
     target = next((ch for ch in parsed if hashlib.md5(ch["url"].encode("utf-8")).hexdigest()[:8] == ch_id), None)
     if not target:
-        return jsonify({"ok": False, "error": "Канал не найден"}), 404
+        return jsonify({"ok": False, "error": "Нет канала"}), 404
 
     preview_dir = Config.HLS_DIR / f"chprev_{ch_id}"
     preview_dir.mkdir(parents=True, exist_ok=True)
     for f in preview_dir.glob("*.ts"):
-        try: f.unlink(missing_ok=True)
-        except: pass
+        try:
+            f.unlink(missing_ok=True)
+        except Exception:
+            pass
     if (preview_dir / "index.m3u8").exists():
-        try: (preview_dir / "index.m3u8").unlink()
-        except: pass
+        try:
+            (preview_dir / "index.m3u8").unlink()
+        except Exception:
+            pass
 
-    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-i", target["url"],
-           "-c", "copy", "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-           "-hls_flags", "delete_segments+append_list",
-           "-hls_segment_filename", str(preview_dir / "seg_%03d.ts"),
-           str(preview_dir / "index.m3u8")]
-    res = process_manager.start(f"chprev_{ch_id}", cmd)
-    return jsonify(res), (200 if res.get("ok") else 400)
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error",
+        "-i", target["url"], "-c", "copy",
+        "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+        "-hls_flags", "delete_segments+append_list",
+        "-hls_segment_filename", str(preview_dir / "seg_%03d.ts"),
+        str(preview_dir / "index.m3u8"),
+    ]
+    return jsonify(process_manager.start(f"chprev_{ch_id}", cmd))
 
 
 @app.route("/api/mosaic/preview-channel/<ch_id>/stop", methods=["POST"])
@@ -744,141 +1061,235 @@ def api_mosaic_channel_preview_stop(ch_id):
 
 
 # ============================================================
-# Общие процессы
+# API — ОБЩИЕ ПРОЦЕССЫ
 # ============================================================
-
 @app.route("/api/process/status")
 @login_required
 def api_process_status():
-    statuses = {name: process_manager.status(name) for name in KNOWN_PROCESSES}
+    # ------------ подсказка ----------------
+    # Полный статус всех процессов: test_ffmpeg, overlay-прокси, MPTS.
+    # any_running используется в UI для глобального LED.
+    statuses = {p["name"]: process_manager.status(p["name"]) for p in process_manager.list_all()}
     for item in overlay_engine.get_active_snapshot():
         statuses[item["process_name"]] = process_manager.status(item["process_name"])
     for g in mpts_cfg.groups:
         statuses[f"mpts_{g.id}"] = process_manager.status(f"mpts_{g.id}")
-    return jsonify({"ok": True, "any_running": any(s.get("running", False) for s in statuses.values()),
-                    "processes": statuses})
+    return jsonify({
+        "ok": True,
+        "any_running": any(s.get("running", False) for s in statuses.values()),
+        "processes": statuses,
+    })
 
 
 @app.route("/api/process/log")
 @login_required
 def api_process_log():
+    # ------------ подсказка ----------------
+    # Возвращает последние N строк лога по имени процесса.
+    # Используется страницей /process для отладки test_ffmpeg.
     name = request.args.get("name", "test_ffmpeg")
     log_path = Config.LOGS_DIR / f"{name}.log"
     if not log_path.exists():
         return jsonify({"ok": True, "total": 0, "lines": []})
     all_lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return jsonify({"ok": True, "total": len(all_lines),
-                    "lines": all_lines[-request.args.get("lines", 50, type=int):]})
+    return jsonify({
+        "ok": True,
+        "total": len(all_lines),
+        "lines": all_lines[-request.args.get("lines", 50, type=int):],
+    })
 
 
 @app.route("/api/process/start", methods=["POST"])
 @login_required
 def api_process_start():
-    res = process_manager.start("test_ffmpeg", TEST_FFMPEG_COMMAND)
-    return jsonify(res), (200 if res.get("ok") else 400)
+    return jsonify(process_manager.start("test_ffmpeg", TEST_FFMPEG_COMMAND))
 
 
 @app.route("/api/process/stop", methods=["POST"])
 @login_required
 def api_process_stop():
-    res = process_manager.stop("test_ffmpeg")
-    return jsonify(res), (200 if res.get("ok") else 404)
+    return jsonify(process_manager.stop("test_ffmpeg"))
+
+
+@app.route("/api/process/stop-all", methods=["POST"])
+@login_required
+def api_process_stop_all():
+    # ------------ подсказка ----------------
+    # Аварийная кнопка "STOP ALL":
+    # 1) останавливаем overlay_engine (все прокси);
+    # 2) останавливаем всё, что знает process_manager (mpts, preview, test);
+    # 3) на Windows ещё делаем taskkill /IM ffmpeg.exe — на случай сирот,
+    #    которые не учтены в реестре процессов.
+    import sys, subprocess as sp
+    result = {"ok": True, "stopped": [], "orphans_killed": 0}
+    try:
+        overlay_engine.stop_all()
+        result["stopped"].append("overlay_proxies")
+    except Exception:
+        pass
+    try:
+        result["stopped"].extend(process_manager.stop_all())
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        try:
+            cp = sp.run(["taskkill", "/IM", "ffmpeg.exe", "/F"], capture_output=True, text=True, timeout=5)
+            result["orphans_killed"] = cp.stdout.count("SUCCESS")
+        except Exception:
+            pass
+    result["message"] = f"Остановлено: {len(result['stopped'])}. Убито: {result['orphans_killed']}."
+    return jsonify(result)
+
+
+@app.route("/api/process/restart-all", methods=["POST"])
+@login_required
+def api_process_restart_all():
+    # ------------ подсказка ----------------
+    # Полный перезапуск:
+    # 1) запоминаем, какие MPTS-группы были запущены;
+    # 2) глушим все FFmpeg (включая сирот на Windows);
+    # 3) ждём 1.5 сек — чтобы ОС освободила порты и файлы;
+    # 4) overlay_engine.sync() поднимает все прокси заново;
+    # 5) по списку запускаем MPTS-группы, которые были активны.
+    import sys, subprocess as sp
+    result = {"ok": True, "started_mpts": 0, "errors": []}
+    was_running = [g.id for g in mpts_cfg.groups if process_manager.status(f"mpts_{g.id}").get("running")]
+
+    try:
+        overlay_engine.stop_all()
+    except Exception:
+        pass
+    try:
+        process_manager.stop_all()
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        try:
+            sp.run(["taskkill", "/IM", "ffmpeg.exe", "/F"], capture_output=True)
+        except Exception:
+            pass
+
+    time.sleep(1.5)
+
+    try:
+        overlay_engine.sync()
+    except Exception:
+        pass
+
+    for gid in was_running:
+        try:
+            res = _start_mpts_group_internal(gid)
+            if res.get("ok"):
+                result["started_mpts"] += 1
+        except Exception:
+            pass
+
+    result["message"] = f"Перезапущено MPTS: {result['started_mpts']}"
+    return jsonify(result)
 
 
 # ============================================================
-# Раздача HLS
+# РАЗДАЧА HLS (с защитой от PermissionError)
 # ============================================================
+@app.route("/overlay/hls/<ch_id>/<path:filename>")
+def serve_hls(ch_id, filename):
+    # ------------ подсказка ----------------
+    # На Windows FFmpeg иногда держит файл открытым на запись (rename .tmp
+    # или запись ts). В этот момент send_from_directory падает с
+    # PermissionError. Возвращаем 503 + Retry-After: 1 — плеер повторит
+    # запрос через секунду, а не покажет "файл не найден".
+    try:
+        resp = send_from_directory(str(Path(Config.HLS_DIR) / ch_id), filename)
+        if filename.endswith(".m3u8"):
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return resp
+    except PermissionError:
+        return "Locked", 503, {"Retry-After": "1"}
+    except FileNotFoundError:
+        return "Not found", 404
+
 
 @app.route("/proxy/hls/<ch_id>/<path:filename>")
 def serve_proxy_hls(ch_id, filename):
-    directory = Path(Config.HLS_DIR) / f"proxy_{ch_id}"
-    resp = send_from_directory(str(directory), filename)
-    if filename.endswith(".m3u8"):
-        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["Expires"] = "0"
-    elif filename.endswith(".ts"):
-        resp.headers["Cache-Control"] = "public, max-age=5"
-    return resp
+    try:
+        resp = send_from_directory(str(Path(Config.HLS_DIR) / f"proxy_{ch_id}"), filename)
+        # ------------ подсказка ----------------
+        # m3u8 — no-cache, ts — max-age=5 (сегменты неизменяемы,
+        # но и копить их в кэше браузера нельзя — быстро устаревают).
+        if filename.endswith(".m3u8"):
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        elif filename.endswith(".ts"):
+            resp.headers["Cache-Control"] = "public, max-age=5"
+        return resp
+    except PermissionError:
+        return "Locked", 503, {"Retry-After": "1"}
+    except FileNotFoundError:
+        return "Not found", 404
 
 
 @app.route("/mosaic/hls/<group_id>/<path:filename>")
 def serve_mosaic_hls(group_id, filename):
-    directory = Path(Config.HLS_DIR) / f"preview_{group_id}"
-    resp = send_from_directory(str(directory), filename)
-    if filename.endswith(".m3u8"):
-        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["Expires"] = "0"
-    elif filename.endswith(".ts"):
-        resp.headers["Cache-Control"] = "public, max-age=5"
-    return resp
+    try:
+        resp = send_from_directory(str(Path(Config.HLS_DIR) / f"preview_{group_id}"), filename)
+        if filename.endswith(".m3u8"):
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        elif filename.endswith(".ts"):
+            resp.headers["Cache-Control"] = "public, max-age=5"
+        return resp
+    except PermissionError:
+        return "Locked", 503, {"Retry-After": "1"}
+    except FileNotFoundError:
+        return "Not found", 404
 
 
 @app.route("/mosaic/chprev/<ch_id>/<path:filename>")
 def serve_chprev_hls(ch_id, filename):
-    directory = Path(Config.HLS_DIR) / f"chprev_{ch_id}"
-    resp = send_from_directory(str(directory), filename)
-    if filename.endswith(".m3u8"):
-        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["Expires"] = "0"
-    elif filename.endswith(".ts"):
-        resp.headers["Cache-Control"] = "public, max-age=5"
-    return resp
+    try:
+        resp = send_from_directory(str(Path(Config.HLS_DIR) / f"chprev_{ch_id}"), filename)
+        if filename.endswith(".m3u8"):
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        elif filename.endswith(".ts"):
+            resp.headers["Cache-Control"] = "public, max-age=5"
+        return resp
+    except PermissionError:
+        return "Locked", 503, {"Retry-After": "1"}
+    except FileNotFoundError:
+        return "Not found", 404
 
 
-@app.route("/overlay/hls/<ch_id>/<path:filename>")
-def serve_hls(ch_id, filename):
-    directory = Path(Config.HLS_DIR) / ch_id
-    resp = send_from_directory(str(directory), filename)
-    if filename.endswith(".m3u8"):
-        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["Expires"] = "0"
-    elif filename.endswith(".ts"):
-        resp.headers["Cache-Control"] = "public, max-age=5"
-    return resp
-
-def _find_emoji(text: str) -> list[str]:
-    """
-    Находит эмодзи-символы в тексте.
-    Возвращает список уникальных найденных эмодзи.
-    """
-    if not text:
-        return []
-    found = []
-    seen = set()
-    for ch in text:
-        cp = ord(ch)
-        is_emoji = (
-            0x1F300 <= cp <= 0x1F9FF or   # Основные эмодзи
-            0x1F600 <= cp <= 0x1F64F or   # Смайлы
-            0x1F680 <= cp <= 0x1F6FF or   # Транспорт
-            0x1FA00 <= cp <= 0x1FAFF or   # Расширенные
-            0x2600 <= cp <= 0x27BF or     # Разные символы (⚡☀❄ и т.д.)
-            0x1F1E6 <= cp <= 0x1F1FF or   # Флаги
-            0x2B00 <= cp <= 0x2BFF         # Доп. стрелки и звёзды
-        )
-        # Исключения: символы, которые MЫ считаем допустимыми
-        safe_cp = {
-            0x2605, 0x2606,  # ★ ☆ (звёзды — есть в Arial)
-            0x2665, 0x2661,  # ♥ ♡ (сердца)
-            0x266A, 0x266B,  # ♪ ♫ (музыка)
-            0x2713, 0x2714, 0x2717, 0x2718,  # ✓ ✔ ✗ ✘ (галочки)
-            0x263A, 0x263B,  # ☺ ☻ (смайлы)
-            0x2600, 0x263C,  # ☀ ☼ (солнце)
-            0x2601, 0x2602, 0x2603,  # ☁ ☂ ☃
-            0x2744, 0x2745, 0x2746,  # ❄ ❅ ❆
-            0x2668,          # ♨ (горячий источник)
-            0x2702, 0x2708,  # ✂ ✈ (ножницы, самолёт)
-            0x26A1,          # ⚡ (молния — обычно рендерится)
-        }
-        if is_emoji and cp not in safe_cp:
-            if ch not in seen:
-                seen.add(ch)
-                found.append(ch)
-    return found
-
+# ============================================================
+# ТОЧКА ВХОДА
+# ============================================================
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=Config.DEBUG, use_reloader=False)
+    # ------------ подсказка ----------------
+    # При старте печатаем список маршрутов — это спасает часы отладки,
+    # когда кажется, что "маршрут есть, а 404 приходит".
+    print("=" * 70)
+    print("ЗАГРУЖЕННЫЕ МАРШРУТЫ:")
+    for rule in sorted(app.url_map.iter_rules(), key=lambda r: r.rule):
+        print(f"  {rule.rule:55} -> {rule.endpoint}")
+    print("=" * 70)
+
+    # ------------ подсказка ----------------
+    # Автозапуск групп MPTS с auto_start=True. Отложен на 3 сек, чтобы
+    # Flask успел стартовать иначе HTTP-входы MPTS получат "conn refused".
+    def _delayed_autostart():
+        time.sleep(3)
+        try:
+            _auto_start_mpts_groups()
+        except Exception as e:
+            print(f"[startup] autostart failed: {e}")
+
+    threading.Thread(target=_delayed_autostart, daemon=True).start()
+
+    # ------------ подсказка ----------------
+    # use_reloader=False — ОБЯЗАТЕЛЬНО. С релоадером Flask запускает
+    # приложение дважды, и все прокси/MPTS стартуют парами, что приводит
+    # к конфликтам портов и "двойным" ffmpeg.exe.
+    socketio.run(
+        app, host="127.0.0.1", port=5000,
+        debug=Config.DEBUG,
+        use_reloader=False,
+        allow_unsafe_werkzeug=True,
+    )
+
