@@ -196,13 +196,13 @@ class OverlayEngine:
             "-f", "hls",
             "-hls_time", str(self.cfg.hls_time_sec),
             "-hls_list_size", "15",
-            # -----подсказка------------
-# +temp_file — писать index.m3u8 через .tmp → атомарный rename.
-# Без него FFmpeg открывает index.m3u8 на запись напрямую (truncate→write),
-# и в это окно файл либо 0 байт, либо залочен. MPTS открывает вход один
-# раз, ловит окно → "No such file or directory". С +temp_file файл
-# существует всегда — заменяется атомарно.
-            "-hls_flags", "delete_segments+append_list+discont_start+temp_file",
+            # ------------ подсказка ----------------
+# Убрали +temp_file: на Windows rename(.tmp → .m3u8) не работает,
+# пока Flask отдаёт index.m3u8 читателям (мозаика, MPTS).
+# Windows блокирует rename поверх открытого файла.
+# Без +temp_file FFmpeg пишет in-place: файл существует всегда,
+# гонка длится микросекунды, MPTS/мозаика на HTTP переживают её.
+            "-hls_flags", "delete_segments+append_list+discont_start",
             "-hls_segment_filename", str(out_dir / "seg_%03d.ts"),
             str(playlist),
         ]
