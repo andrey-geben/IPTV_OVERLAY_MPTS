@@ -1,8 +1,19 @@
 {% extends "base.html" %}
 {% block title %}Overlay — {{ config.APP_NAME }}{% endblock %}
 {% block content %}
+<div class="actions" style="margin-bottom:12px;">
+    <a href="{{ url_for('mosaic_page') }}" class="btn btn--small">← 3 · Мозаика</a>
+    <a href="{{ url_for('mpts_page') }}" class="btn btn--small">2 · MPTS →</a>
+</div>
 <section class="panel">
     <h2 class="panel__title"><span class="led led--on"></span>БЕГУЩИЕ СТРОКИ — ПРАВИЛА</h2>
+
+    <p class="hint" style="margin:8px 0 14px;">
+        HLS-прокси поднимаются только для каналов, у которых есть правила — остальные
+        MPTS читает напрямую (экономия CPU, RAM и сети). Если вы <b>добавили или сняли</b>
+        правило на канале, который уже в MPTS, перезапустите MPTS-группу: вход потока
+        выбирается в момент старта. Правка текста уже активной строки перезапуска не требует.
+    </p>
     <details class="help-spoiler">
         <summary>Как работают правила</summary>
         <div>

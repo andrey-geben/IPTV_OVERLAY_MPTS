@@ -15,20 +15,16 @@
         </div>
 
         <nav class="topnav">
-            <a href="{{ url_for('playlist_page') }}"
-               class="topnav__link {% if request.endpoint == 'playlist_page' %}is-active{% endif %}">1. PLAYLIST</a>
-            <a href="{{ url_for('mpts_page') }}"
-               class="topnav__link {% if request.endpoint == 'mpts_page' %}is-active{% endif %}">2. MPTS</a>
-            <a href="{{ url_for('mosaic_page') }}"
-               class="topnav__link {% if request.endpoint == 'mosaic_page' %}is-active{% endif %}">3. MOSAIC</a>
-            <a href="{{ url_for('overlay_page') }}"
-               class="topnav__link {% if request.endpoint == 'overlay_page' %}is-active{% endif %}">4. OVERLAY</a>
-            <a href="{{ url_for('process_page') }}"
-               class="topnav__link {% if request.endpoint == 'process_page' %}is-active{% endif %}">PROCESS</a>
-            <a href="{{ url_for('styleguide') }}"
-               class="topnav__link {% if request.endpoint == 'styleguide' %}is-active{% endif %}">STYLE</a>
-            <a href="{{ url_for('about_page') }}"
-               class="topnav__link {% if request.endpoint == 'about_page' %}is-active{% endif %}">ABOUT</a>
+            <a href="{{ url_for('playlist_page') }}" class="topnav__link {% if request.endpoint == 'playlist_page' %}is-active{% endif %}">1 · КАНАЛЫ</a>
+            {% if session.user.role in ['admin', 'operator'] %}
+            <a href="{{ url_for('mpts_page') }}" class="topnav__link {% if request.endpoint == 'mpts_page' %}is-active{% endif %}">2 · MPTS</a>
+            {% endif %}
+            <a href="{{ url_for('mosaic_page') }}" class="topnav__link {% if request.endpoint == 'mosaic_page' %}is-active{% endif %}">3 · МОЗАИКА</a>
+            {% if session.user.role in ['admin', 'operator'] %}
+            <a href="{{ url_for('overlay_page') }}" class="topnav__link {% if request.endpoint == 'overlay_page' %}is-active{% endif %}">4 · ОВЕРЛЕИ</a>
+            <a href="{{ url_for('process_page') }}" class="topnav__link {% if request.endpoint == 'process_page' %}is-active{% endif %}">ПРОЦЕССЫ</a>
+            {% endif %}
+            <a href="{{ url_for('about_page') }}" class="topnav__link {% if request.endpoint == 'about_page' %}is-active{% endif %}">О ПРОГРАММЕ</a>
         </nav>
 
         <div class="status-strip">
@@ -45,6 +41,11 @@
             <a href="{{ url_for('logout_page') }}" class="btn btn--small" style="text-decoration:none;">ВЫЙТИ</a>
             {% endif %}
             <span><span class="led led--on"></span>SYSTEM</span>
+            <span class="load-strip" id="load-strip" title="Текущая нагрузка сервера">
+                <span class="load-strip__item"><span id="ld-cpu-led" class="led"></span>CPU <b id="ld-cpu">—</b></span>
+                <span class="load-strip__item"><span id="ld-ram-led" class="led"></span>RAM <b id="ld-ram">—</b></span>
+                <span class="load-strip__item"><span id="ld-net-led" class="led"></span>NET <b id="ld-net">—</b></span>
+            </span>
             <span><span id="led-test_ffmpeg" class="led"></span>TEST</span>
             <span><span id="led-mpts" class="led"></span>MPTS</span>
             <span id="clock">--:--:--</span>
@@ -94,6 +95,26 @@
     // WebSocket подключение
     const socket = io({ transports: ["polling"] });
     window.socket = socket;
+
+    // Полоса нагрузки в шапке
+    function _ledClass(el, pct) {
+        if (!el) return;
+        el.className = pct >= 85 ? "led led--err" : pct >= 70 ? "led led--warn" : "led led--on";
+    }
+    function updateLoadStrip(c) {
+        const h = c.host || {}, n = c.net || {};
+        const cpu = Number(h.cpu_percent || 0), ram = Number(h.ram_percent || 0);
+        const net = Number(n.tx_mbps || 0);
+        const netPct = n.link_mbps ? Math.min(100, net / n.link_mbps * 100) : 0;
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+        set("ld-cpu", cpu.toFixed(0) + "%");
+        set("ld-ram", ram.toFixed(0) + "%");
+        set("ld-net", net.toFixed(0) + " Мбит/с");
+        _ledClass(document.getElementById("ld-cpu-led"), cpu);
+        _ledClass(document.getElementById("ld-ram-led"), ram);
+        _ledClass(document.getElementById("ld-net-led"), netPct);
+    }
+    socket.on("update", (data) => { if (data && data.capacity) updateLoadStrip(data.capacity); });
 
     socket.on("connect", () => {
         console.log("[ws] connected");

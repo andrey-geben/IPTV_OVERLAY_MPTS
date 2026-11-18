@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}Каналы — {{ config.APP_NAME }}{% endblock %}
+
+{% block content %}
+<section class="panel">
+    <h2 class="panel__title"><span class="led led--on"></span>КАНАЛЫ ИЗ ПАПОК — «папка = канал»</h2>
+
+    <p class="hint" style="margin:8px 0 14px;">
+        Один канал — одна папка с видео. <b>1. INGEST</b> приводит все файлы к одному профилю
+        (720×576, 25 fps, H.264/AAC) и может вшить логотип. После этого эфир идёт склейкой
+        <code>-c copy</code> — почти без нагрузки на CPU. Порядок показа перемешивается заново
+        на каждой итерации. Готовый канал добавьте в MPTS по кнопке «URL для MPTS».
+    </p>
+
+    <div class="actions" style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+        <label class="field-label" style="display:block;">
+            Папка с видео
+            <input id="channel-src" type="text" placeholder="D:\Media\Channel1" style="min-width:340px;">
+        </label>
+        <label class="field-label" style="display:block;">
+            Название
+            <input id="channel-name" type="text" placeholder="Свой канал 1">
+        </label>
+        <button id="btn-channel-add" class="btn btn--primary">➕ Добавить канал</button>
+        <button id="btn-channels-refresh" class="btn">⭮ Обновить</button>
+    </div>
+
+    <div id="channels-error" class="alert alert--error" style="display:none; margin-top:12px;">
+        <span class="led led--err"></span><span id="channels-error-text"></span>
+    </div>
+
+    <table style="margin-top:14px;">
+        <thead>
+            <tr>
+                <th>Канал</th>
+                <th>Папка</th>
+                <th>Файлов</th>
+                <th>Состояние</th>
+                <th>Действия</th>
+            </tr>
+        </thead>
+        <tbody id="channels-body">
+            <tr><td colspan="5" class="hint">Загрузка…</td></tr>
+        </tbody>
+    </table>
+</section>
+
+<script src="{{ url_for('static', filename='js/channels.js') }}?v=1"></script>
+{% endblock %}

@@ -33,3 +33,13 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# --- Сборки и крупные бинарники (не храним в git) ---
+bin/
+*.zip
+dist_build/
+build_build/
+*.old/
+
+# --- Резервные копии при правках ---
+*.bak-*

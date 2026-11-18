@@ -8,13 +8,16 @@
 Поток: /proxy/hls/<ch_id>/index.m3u8
 """
 import hashlib
+import os
 import time
 from datetime import datetime
 from pathlib import Path
 
 from .m3u_parser import parse_m3u
 from .overlay_models import OverlayConfig, OverlayRule
-from .overlay_filter import build_drawtext_filter
+from .overlay_filter import build_drawtext_filter, build_ticker_overlay_filter
+from .ticker_render import has_emoji, render_ticker_png
+from .encoders import overlay_video_args, qsv_available
 from .process_manager import ProcessManager
 
 
@@ -30,6 +33,16 @@ class OverlayEngine:
         self.cfg = cfg
         # {url: {"rule_id": str|None, "process_name": str, "ch_id": str}}
         self.active_channels: dict[str, dict] = {}
+        # Тексты тикеров: файл на канал + кэш последнего записанного текста
+        self._text_dir = self.hls_dir.parent / "overlay_text"
+        self._text_dir.mkdir(parents=True, exist_ok=True)
+        self._text_cache: dict[str, str] = {}
+        # PNG-тикеры для текстов с эмодзи (drawtext их не умеет)
+        self._ticker_dir = self.hls_dir.parent / "ticker"
+        self._ticker_dir.mkdir(parents=True, exist_ok=True)
+        self._png_meta: dict[str, tuple[int, int]] = {}
+        # Аппаратный энкод: включаем, только если h264_qsv реально работает
+        self._use_qsv: bool = qsv_available()
 
     # ---------- Public API ----------
 
@@ -43,6 +56,14 @@ class OverlayEngine:
         # Набор URL, которые должны работать. Именно его проверяет
         # строка `if url not in working:` в шаге 3.
         working = set(self.cfg.working_channel_urls)
+
+        # ------------ подсказка -----------------
+        # Прокси нужен только тем каналам, которые вообще упомянуты в правилах
+        # (активных или нет). Остальным — не нужен: MPTS читает их напрямую.
+        # Экономия: минус процесс, минус сегменты на диск, минус двойной трафик.
+        needed_for_overlay = {
+            u for rule in self.cfg.rules for u in rule.channel_urls if u in working
+        }
 
         # 1. Активные правила
         active_rules_by_url: dict[str, OverlayRule] = {}
@@ -74,16 +95,30 @@ class OverlayEngine:
 
         # 3. Останавливаем то, что выпало из рабочего плейлиста
         for url in list(alive_state.keys()):
-            if url not in working:
+            if url not in working or url not in needed_for_overlay:
                 self._stop_channel(url)
 
         # 4. Запускаем то, что в рабочем плейлисте
         for url in self.cfg.working_channel_urls:
+            if url not in needed_for_overlay:
+                continue  # оверлея нет — пусть MPTS читает источник напрямую
             active_rule = active_rules_by_url.get(url)
             expected_rule_id = active_rule.id if active_rule else None
 
             current = alive_state.get(url)
             if current and current["rule_id"] == expected_rule_id:
+                # Правило то же, но текст мог измениться — обновляем файл,
+                # FFmpeg продолжает работать (эфир и MPTS не рвутся).
+                if active_rule and self._text_cache.get(current["ch_id"]) != active_rule.text.text:
+                    if has_emoji(active_rule.text.text):
+                        # PNG не перечитывается на ходу — перезапускаем канал.
+                        # MPTS это переживает: он читает HLS через отдельный сервер.
+                        self._stop_channel(url)
+                        current = None
+                    else:
+                        self._write_text(current["ch_id"], active_rule.text.text)
+                        self._text_cache[current["ch_id"]] = active_rule.text.text
+                        print(f"[overlay] {current['ch_id']} text updated live")
                 continue  # уже в нужном режиме
 
             # Если процесс с этим ch_id уже запущен и режим совпадает — просто регистрируем
@@ -115,6 +150,47 @@ class OverlayEngine:
         return [{"url": url, **info} for url, info in self.active_channels.items()]
 
     # ---------- Internal ----------
+
+    def _text_path(self, ch_id: str) -> Path:
+        return self._text_dir / f"{ch_id}.txt"
+
+    def _ticker_png(self, ch_id: str) -> Path:
+        return self._ticker_dir / f"{ch_id}.png"
+
+    def _render_ticker(self, ch_id: str, rule: "OverlayRule"):
+        """Рендерит текст правила в PNG с цветными эмодзи."""
+        png = self._ticker_png(ch_id)
+        text = rule.text
+        try:
+            w, h = render_ticker_png(
+                text.text,
+                png,
+                font_path=getattr(text, "font_path", None),
+                font_size=int(getattr(text, "font_size", 28)),
+                font_color=getattr(text, "font_color", "#FFFFFF"),
+            )
+        except Exception as exc:
+            print(f"[overlay] ticker render failed: {exc}")
+            return png, 0, 0
+        self._png_meta[ch_id] = (w, h)
+        return png, w, h
+
+    def _write_text(self, ch_id: str, text: str) -> Path:
+        """Пишет текст тикера в файл. drawtext с reload=1 читает его на ходу,
+        поэтому правка строки не перезапускает FFmpeg (и не рвёт MPTS)."""
+        path = self._text_path(ch_id)
+        clean = (text or "").replace("\r", " ").replace("\n", " ")
+        tmp = path.with_suffix(".tmp")
+        try:
+            tmp.write_text(clean, encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                path.write_text(clean, encoding="utf-8")
+            except Exception as exc:
+                print(f"[overlay] text write failed: {exc}")
+        return path
+
 
     def _is_active(self, rule: OverlayRule, now: datetime) -> bool:
         if rule.start_date or rule.end_date:
@@ -177,17 +253,23 @@ class OverlayEngine:
         ]
 
         if rule:
-            drawtext = build_drawtext_filter(rule.text)
-            cmd += ["-vf", drawtext]
-            cmd += [
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-b:v", "2500k", "-maxrate", "3000k", "-bufsize", "5000k",
-                # -----подсказка------------
-                # Закрытый GOP каждые 2 сек (50 кадров при 25 fps) — HLS-клиенты
-                # (VLC, ffplay, MPTS) переключаются на границах keyframe'ов.
-                # Без этого libx264 ставит keyframe'ы по сцене, и HLS «дёргается».
-                "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
-            ]
+            if has_emoji(rule.text.text):
+                # Эмодзи: drawtext не умеет цветные глифы — накладываем PNG
+                png, w, h = self._render_ticker(ch_id, rule)
+                meta = self._png_meta.get(ch_id)
+                if not meta or not png.exists():
+                    png, w, h = self._render_ticker(ch_id, rule)
+                    meta = (w, h)
+                cmd += ["-loop", "1", "-i", str(png)]
+                cmd += ["-filter_complex", build_ticker_overlay_filter(rule.text, meta[0]),
+                        "-map", "[v]", "-map", "0:a?"]
+            else:
+                if not self._text_path(ch_id).exists():
+                    # файл текста нужен drawtext уже на старте (reload=1)
+                    self._write_text(ch_id, rule.text.text)
+                drawtext = build_drawtext_filter(rule.text, text_file=str(self._text_path(ch_id)))
+                cmd += ["-vf", drawtext]
+            cmd += overlay_video_args(use_qsv=self._use_qsv)
         else:
             cmd += ["-c", "copy"]
 
@@ -213,11 +295,31 @@ class OverlayEngine:
         out_dir = self.hls_dir / f"proxy_{ch_id}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        if rule:
+            if has_emoji(rule.text.text):
+                self._render_ticker(ch_id, rule)
+            else:
+                self._write_text(ch_id, rule.text.text)
+            self._text_cache[ch_id] = rule.text.text
+
         cmd = self._build_command(url, rule)
         mode = f"OVERLAY({rule.name})" if rule else "COPY"
         proc_name = f"proxy_{ch_id}"
 
         res = self.pm.start(proc_name, cmd)
+
+        # ------------ подсказка -----------------
+        # QSV зависит от драйвера: если энкодер не поднялся — один раз
+        # откатываемся на libx264 и больше не пробуем, чтобы не рвать эфир.
+        if res.get("ok") and rule and self._use_qsv:
+            time.sleep(0.8)
+            if not self.pm.status(proc_name).get("running"):
+                print("[overlay] h264_qsv не поднялся — перехожу на libx264")
+                self._use_qsv = False
+                self.pm.stop(proc_name)
+                cmd = self._build_command(url, rule)
+                res = self.pm.start(proc_name, cmd)
+
         if res.get("ok"):
             self.active_channels[url] = {
                 "rule_id": rule.id if rule else None,

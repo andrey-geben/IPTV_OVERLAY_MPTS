@@ -3,6 +3,39 @@
 {% block title %}Process — IPTV OVERLAY + MPTS{% endblock %}
 
 {% block content %}
+<section class="panel" id="budget-panel">
+    <h2 class="panel__title"><span id="budget-led" class="led led--warn"></span>БЮДЖЕТ СИСТЕМЫ — чтобы не перегрузить железо</h2>
+
+    <div class="budget-bars">
+        <div class="budget-bar">
+            <span class="budget-bar__label">CPU</span>
+            <div class="budget-bar__track"><div id="bar-cpu" class="budget-bar__fill"></div></div>
+            <span id="val-cpu" class="budget-bar__value">—</span>
+        </div>
+        <div class="budget-bar">
+            <span class="budget-bar__label">RAM</span>
+            <div class="budget-bar__track"><div id="bar-ram" class="budget-bar__fill"></div></div>
+            <span id="val-ram" class="budget-bar__value">—</span>
+        </div>
+        <div class="budget-bar">
+            <span class="budget-bar__label">СЕТЬ</span>
+            <div class="budget-bar__track"><div id="bar-net" class="budget-bar__fill"></div></div>
+            <span id="val-net" class="budget-bar__value">—</span>
+        </div>
+    </div>
+
+    <div class="budget-readouts">
+        <span>Тикеров активно: <b id="bd-overlay">—</b></span>
+        <span>MPTS-программ: <b id="bd-programs">—</b></span>
+        <span>Запас на тикеры: <b id="bd-extra">—</b></span>
+        <span>Энкод: <b id="bd-codec">—</b></span>
+        <span>Ядер: <b id="bd-cores">—</b></span>
+    </div>
+
+    <ul id="budget-hints" class="budget-hints">
+        <li class="hint">Загрузка данных…</li>
+    </ul>
+</section>
 <section class="panel">
     <h2 class="panel__title"><span class="led led--on"></span>PROCESS CONTROL — test_ffmpeg</h2>
 
@@ -60,4 +93,67 @@
 </section>
 
 <script src="{{ url_for('static', filename='js/process.js') }}?v=3"></script>
+
+<script>
+(function () {
+    function bar(id, pct) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const p = Math.max(0, Math.min(100, Number(pct) || 0));
+        el.style.width = p + "%";
+        el.className = "budget-bar__fill " + (p >= 85 ? "is-err" : p >= 70 ? "is-warn" : "is-ok");
+    }
+    function render(c) {
+        const h = c.host || {}, n = c.net || {}, r = c.running || {}, e = c.estimate || {};
+        const cpu = Number(h.cpu_percent || 0), ram = Number(h.ram_percent || 0);
+        const net = Number(n.tx_mbps || 0);
+        const netPct = n.link_mbps ? net / n.link_mbps * 100 : 0;
+
+        bar("bar-cpu", cpu);
+        bar("bar-ram", ram);
+        bar("bar-net", netPct);
+
+        const txt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+        txt("val-cpu", cpu.toFixed(0) + "% / " + (h.cpu_count || "?") + " потоков");
+        txt("val-ram", ram.toFixed(0) + "% (" + (h.ram_used_gb || 0) + " из " + (h.ram_total_gb || 0) + " ГБ)");
+        txt("val-net", net.toFixed(0) + " из " + (n.link_mbps || 0) + " Мбит/с");
+        txt("bd-overlay", r.overlay_encode || 0);
+        txt("bd-programs", (r.mpts_programs || 0) + " в " + (r.mpts_groups || 0) + " группах");
+        txt("bd-extra", (e.extra_overlay_channels || 0) + " каналов");
+        txt("bd-codec", h.qsv ? "h264_qsv (аппаратный)" : "libx264 (программный)");
+        txt("bd-cores", h.cpu_count || "—");
+
+        const led = document.getElementById("budget-led");
+        if (led) {
+            led.className = c.verdict === "err" ? "led led--err led--pulse"
+                : c.verdict === "warn" ? "led led--warn" : "led led--on";
+        }
+
+        const ul = document.getElementById("budget-hints");
+        if (ul && Array.isArray(c.hints)) {
+            ul.innerHTML = "";
+            c.hints.forEach(function (hint) {
+                const li = document.createElement("li");
+                li.className = "budget-hint budget-hint--" + (hint.level || "info");
+                li.textContent = hint.text;
+                ul.appendChild(li);
+            });
+        }
+    }
+
+    function pull() {
+        fetch("/api/system/capacity", { credentials: "same-origin" })
+            .then(function (r) { return r.json(); })
+            .then(function (data) { if (data && data.host) render(data); })
+            .catch(function () {});
+    }
+
+    document.addEventListener("DOMContentLoaded", pull);
+    if (window.socket) {
+        window.socket.on("update", function (data) { if (data && data.capacity) render(data.capacity); });
+    }
+    setInterval(pull, 10000);
+})();
+</script>
+
 {% endblock %}

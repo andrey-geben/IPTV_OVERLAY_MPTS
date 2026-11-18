@@ -3,6 +3,10 @@
 {% block title %}Мозаика — {{ config.APP_NAME }}{% endblock %}
 
 {% block content %}
+<div class="actions" style="margin-bottom:12px;">
+    <a href="{{ url_for('mpts_page') }}" class="btn btn--small">← 2 · MPTS</a>
+    <a href="{{ url_for('overlay_page') }}" class="btn btn--small">4 · Оверлеи →</a>
+</div>
 
 <div class="mosaic-layout">
     <!-- Панель источников -->

@@ -3,6 +3,10 @@
 {% block title %}MPTS — IPTV OVERLAY + MPTS{% endblock %}
 
 {% block content %}
+<div class="actions" style="margin-bottom:12px;">
+    <a href="{{ url_for('playlist_page') }}" class="btn btn--small">← 1 · Каналы</a>
+    <a href="{{ url_for('mosaic_page') }}" class="btn btn--small">3 · Мозаика →</a>
+</div>
 
 <section class="panel">
     <h2 class="panel__title"><span class="led led--on"></span>1. ИСХОДНЫЙ ПЛЕЙЛИСТ</h2>
@@ -68,10 +72,90 @@
     </form>
 </section>
 
+
+<section class="panel" id="auto-split">
+    <h2 class="panel__title"><span class="led led--warn"></span>АВТОРАСКЛАДКА ПО ГРУППАМ</h2>
+
+    <p class="hint" style="margin:8px 0 12px;">
+        Раскладывает каналы из уже созданных групп в новые, по N программ на группу.
+        Один MPTS на 40–50 программ не влезает в QAM-канал (~48 Мбит/с), поэтому
+        норма — <b>8–12 программ</b> на группу. «Применить» останавливает текущие
+        MPTS-процессы и перезаписывает конфиг.
+    </p>
+
+    <div class="actions" style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+        <label class="field-label">Программ в группе
+            <input id="split-per" type="number" value="10" min="1" max="15" style="width:90px;">
+        </label>
+        <label class="field-label">Первый IP
+            <input id="split-ip" type="text" value="239.0.0.11" style="width:150px;">
+        </label>
+        <label class="field-label">Порт
+            <input id="split-port" type="number" value="5000" style="width:100px;">
+        </label>
+        <label class="field-label" style="display:flex; gap:6px; align-items:center; margin-bottom:6px;">
+            <input id="split-auto" type="checkbox"> автозапуск
+        </label>
+        <button id="btn-split-preview" class="btn">👁 Предпросмотр</button>
+        <button id="btn-split-apply" class="btn btn--primary">⚙ Применить</button>
+    </div>
+
+    <div id="split-result" class="hint" style="margin-top:12px;"></div>
+</section>
+
 <section class="panel">
     <h2 class="panel__title"><span class="led led--warn"></span>3. ГРУППЫ И ДАННЫЕ ДЛЯ PBI</h2>
     <div id="groups-container"></div>
 </section>
+
+
+<script>
+(function () {
+    const out = document.getElementById("split-result");
+    function payload(apply) {
+        return {
+            per_group: Number(document.getElementById("split-per").value) || 10,
+            start_ip: document.getElementById("split-ip").value.trim(),
+            port: Number(document.getElementById("split-port").value) || 5000,
+            auto_start: document.getElementById("split-auto").checked,
+            apply: !!apply,
+        };
+    }
+    function call(apply) {
+        return fetch("/api/mpts/split", {
+            method: "POST", credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload(apply)),
+        }).then(function (r) { return r.json(); });
+    }
+    function renderPreview(res) {
+        if (!res.ok) { out.textContent = "Ошибка: " + (res.error || "?"); return; }
+        let html = "<b>Каналов: " + res.total_channels + "</b>, суммарно ~" + res.total_mbps +
+                   " Мбит/с, в группе ~" + res.per_group_mbps + " Мбит/с<ul style='margin:8px 0 0 18px;'>";
+        res.groups.forEach(function (g) {
+            html += "<li><b>" + g.host + ":" + g.port + "</b> — " + g.name + "</li>";
+        });
+        html += "</ul>";
+        if (res.warnings && res.warnings.length) {
+            html += "<div class='budget-hint budget-hint--warn' style='margin-top:8px;'>" +
+                    res.warnings.join("<br>") + "</div>";
+        }
+        out.innerHTML = html;
+    }
+    document.getElementById("btn-split-preview").onclick = function () {
+        call(false).then(renderPreview).catch(function (e) { out.textContent = e.message; });
+    };
+    document.getElementById("btn-split-apply").onclick = function () {
+        if (!confirm("Остановить текущие MPTS-группы и разложить каналы заново?")) return;
+        call(true).then(function (res) {
+            if (!res.ok) { out.textContent = "Ошибка: " + (res.error || "?"); return; }
+            out.innerHTML = "<b>Готово:</b> создано групп " + res.created +
+                            ", остановлено процессов " + res.stopped + ". Обновите страницу.";
+            setTimeout(function () { location.reload(); }, 1200);
+        }).catch(function (e) { out.textContent = e.message; });
+    };
+})();
+</script>
 
 <script src="{{ url_for('static', filename='js/mpts.js') }}?v=9"></script>
 {% endblock %}

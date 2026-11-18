@@ -37,9 +37,52 @@ def _escape_drawtext(s: str, is_path: bool = False) -> str:
     return s
 
 
-def build_drawtext_filter(t: OverlayText) -> str:
+def build_ticker_overlay_filter(t: OverlayText, png_width: int) -> str:
+    """filter_complex для наложения PNG-строки (нужен для цветных эмодзи).
+
+    [0:v] — видео канала, [1:v] — картинка строки (вход -loop 1 -i file.png).
+    Возвращает граф, который заканчивается меткой [v].
+    """
+    band_height = t.font_size + 4
+    y_offset = max(0, min(300, int(t.y_offset)))
+    band_y = f"ih-{band_height}-{y_offset}"
+    period = max(1, t.repeat_period_sec)
+    speed = max(1, t.speed)
+    on_screen = (720 + max(1, png_width)) / speed
+    enable = f"lt(mod(t,{period}),{on_screen:.1f})"
+
+    box = ""
+    if t.box_enabled and float(t.box_alpha) > 0:
+        box = (
+            f"drawbox=x=0:y={band_y}:w=iw:h={band_height}:"
+            f"color={_to_hex_color(t.box_color)}@{float(t.box_alpha)}:"
+            f"thickness={band_height}:enable='{enable}'[bg];"
+        )
+        base = "[bg]"
+        graph = f"[0:v]{box}"
+    else:
+        base = "[0:v]"
+        graph = ""
+
+    x_expr = f"w-mod(t*{speed}\\,{period}*{speed})"
+    overlay = (
+        f"{base}[1:v]overlay=x='{x_expr}':"
+        f"y=main_h-{band_height}-{y_offset}+({band_height}-h)/2:enable='{enable}'[v]"
+    )
+    return graph + overlay
+
+
+def build_drawtext_filter(t: OverlayText, text_file: str | None = None) -> str:
+    """text_file — путь к txt-файлу тикера (drawtext reload=1).
+
+    С файлом команда FFmpeg перестаёт зависеть от текста: правка строки
+    не требует перезапуска процесса, значит HLS и MPTS не рвутся.
+    """
     font_path = _escape_drawtext(t.font_path, is_path=True)
-    text = _escape_drawtext(t.text, is_path=False)
+    if text_file:
+        text_part = f"textfile='{_escape_drawtext(str(text_file), is_path=True)}':reload=1"
+    else:
+        text_part = f"text='{_escape_drawtext(t.text, is_path=False)}'"
 
     filters = []
 
@@ -85,7 +128,7 @@ def build_drawtext_filter(t: OverlayText) -> str:
     font_color = _normalize_color(t.font_color)
 
     filters.append(
-        f"drawtext=fontfile='{font_path}':text='{text}':fontsize={t.font_size}:"
+        f"drawtext=fontfile='{font_path}':{text_part}:fontsize={t.font_size}:"
         f"fontcolor={font_color}@{t.font_alpha}:x={x_expr}:y={text_y}"
     )
     return ",".join(filters)

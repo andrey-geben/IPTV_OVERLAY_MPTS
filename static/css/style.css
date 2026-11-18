@@ -1312,3 +1312,45 @@ details.help-spoiler ul {
     transform: scale(0.94);
     background: rgba(255, 176, 0, 0.2);
 }
+
+/* ===== Полоса нагрузки в шапке и карточка бюджета ===== */
+.load-strip {
+    display: inline-flex;
+    gap: 10px;
+    align-items: center;
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    opacity: 0.95;
+}
+.load-strip__item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.load-strip__item b { font-variant-numeric: tabular-nums; }
+
+.budget-bars { display: grid; gap: 8px; margin: 12px 0 14px; }
+.budget-bar { display: grid; grid-template-columns: 64px 1fr 210px; gap: 10px; align-items: center; }
+.budget-bar__label { font-size: 0.72rem; letter-spacing: 0.14em; opacity: 0.8; }
+.budget-bar__track {
+    height: 12px; border: 1px solid rgba(255,255,255,0.18); border-radius: 2px;
+    background: rgba(0,0,0,0.45); overflow: hidden;
+}
+.budget-bar__fill { height: 100%; width: 0; transition: width 0.4s ease, background 0.4s ease; }
+.budget-bar__fill.is-ok { background: linear-gradient(180deg, #57c95a, #2f7a33); }
+.budget-bar__fill.is-warn { background: linear-gradient(180deg, #e8b23a, #a8791a); }
+.budget-bar__fill.is-err { background: linear-gradient(180deg, #e85a3a, #a02a14); }
+.budget-bar__value { font-size: 0.74rem; opacity: 0.85; font-variant-numeric: tabular-nums; }
+
+.budget-readouts {
+    display: flex; flex-wrap: wrap; gap: 14px;
+    font-size: 0.76rem; margin-bottom: 10px; opacity: 0.9;
+}
+.budget-readouts b { font-variant-numeric: tabular-nums; }
+
+.budget-hints { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+.budget-hint {
+    font-size: 0.78rem; line-height: 1.35; padding: 7px 10px;
+    border-left: 3px solid rgba(255,255,255,0.25);
+    background: rgba(255,255,255,0.04); border-radius: 2px;
+}
+.budget-hint--ok { border-left-color: #4faf52; }
+.budget-hint--info { border-left-color: #4f86c6; }
+.budget-hint--warn { border-left-color: #e0a92a; }
+.budget-hint--err { border-left-color: #d84a2a; }
